@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Local tooling / scratch
+.claude/
+.tmp/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node / Next
+node_modules/
+.next/
+
+# Flutter / Dart
+.dart_tool/
+build/
+
+# Local env files
+.env
+.env.*
+
+# Deployment secrets
+deploy/secrets/
+*.pem
+
+# Firebase service-account keys (must never be committed)
+api/spd-fraktion-intern-firebase-adminsdk-*.json
+spd_mobile/backend/spd-fraktion-intern-firebase-adminsdk-*.json
+*firebase-adminsdk*.json
+
+# Local backups / exports
+*.zip
+*.tar
+*.tar.gz

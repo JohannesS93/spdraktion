@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:15
+    container_name: spd_postgres
+    environment:
+      POSTGRES_DB: spd_dev
+      POSTGRES_USER: spd_app
+      POSTGRES_PASSWORD: change_me_strong
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  adminer:
+    image: adminer:4
+    container_name: spd_adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+
+volumes:
+  pgdata:
+    external: true
+    name: 3597810aa964a3f5ceb0470a811ffaef4f8cfc3b75a79cdc963cf6fe6e9b99e4

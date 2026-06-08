@@ -1,0 +1,54 @@
+-- Gruppen anlegen
+INSERT INTO groups (id, name)
+VALUES
+('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'A'),
+('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'B'),
+('cccccccc-cccc-cccc-cccc-cccccccccccc', 'C')
+ON CONFLICT DO NOTHING;
+
+-- Users importieren
+INSERT INTO users (id, email, first_name, last_name, group_id, role)
+VALUESpython3 - << 'EOF'
+import csv
+import uui
+group_map = {
+    "A": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "B": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "C": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+}
+
+rows = []
+with open("/mnt/data/Personen-Gruppen_neu3.csv", encoding="latin1") as f:
+    reader = csv.reader(f, delimiter=';')
+    next(reader)
+    for r in reader:
+        vor, nach, grp, role = r
+        email = f"{vor.lower()}.{nach.lower()}@bundestag.de".replace(" ", "")
+        rows.append(
+            f"('{uuid.uuid4()}', '{email}', '{vor}', '{nach}', '{group_map.get(grp)}', '{role}')"
+        )
+
+print(",\n".join(rows) + ";")
+EOFpython3 - << 'EOF'
+import csv
+import uuid
+
+group_map = {
+    "A": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+    "B": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "C": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+}
+
+rows = []
+with open("/mnt/data/Personen-Gruppen_neu3.csv", encoding="latin1") as f:
+    reader = csv.reader(f, delimiter=';')
+    next(reader)
+    for r in reader:
+        vor, nach, grp, role = r
+        email = f"{vor.lower()}.{nach.lower()}@bundestag.de".replace(" ", "")
+        rows.append(
+            f"('{uuid.uuid4()}', '{email}', '{vor}', '{nach}', '{group_map.get(grp)}', '{role}')"
+        )
+
+print(",\n".join(rows) + ";")
+EOF

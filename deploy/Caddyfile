@@ -1,0 +1,11 @@
+{$ADMIN_DOMAIN} {
+	reverse_proxy admin_web:3000
+}
+
+{$API_DOMAIN} {
+	reverse_proxy api:8000
+}
+
+{$PGADMIN_DOMAIN} {
+	reverse_proxy pgadmin:80
+}

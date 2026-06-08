@@ -1,0 +1,94 @@
+/* app/styles/admin.css */
+
+.admin-card {
+  border: 1px solid rgb(226 232 240);
+  background: white;
+  border-radius: 0;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+.admin-card-header {
+  border-bottom: 1px solid rgb(226 232 240);
+}
+
+.admin-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.admin-input {
+  border-radius: 0 !important;
+}
+
+.admin-select-trigger {
+  border-radius: 0 !important;
+}
+
+.admin-btn {
+  border-radius: 0 !important;
+}
+
+.admin-btn-primary {
+  border-radius: 0 !important;
+  background: rgb(15 23 42) !important;
+  color: white !important;
+}
+
+.admin-btn-primary:hover {
+  background: rgb(30 41 59) !important;
+}
+
+.admin-dialog {
+  border-radius: 0 !important;
+  border-color: rgb(226 232 240) !important;
+}
+
+.admin-table {
+  overflow: hidden;
+  border: 1px solid rgb(226 232 240);
+  background: white;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+.admin-table-header {
+  border-bottom: 1px solid rgb(226 232 240);
+  background: white;
+  padding: 0.75rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgb(100 116 139);
+}
+
+.admin-table-row {
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  border-bottom: 1px solid rgb(241 245 249);
+}
+
+.admin-table-row:last-child {
+  border-bottom: 0;
+}
+
+.admin-stat-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: rgb(100 116 139);
+}
+
+.admin-stat-value {
+  font-size: 1.875rem;
+  line-height: 2.25rem;
+  font-weight: 600;
+}
+
+.admin-error {
+  border: 1px solid rgb(254 202 202);
+  background: rgb(254 242 242);
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  color: rgb(185 28 28);
+}
