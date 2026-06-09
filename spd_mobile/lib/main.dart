@@ -14,9 +14,9 @@ import 'core/api_client.dart';
 import 'core/app_theme.dart';
 import 'core/config.dart';
 import 'core/debug_overlay.dart';
+import 'core/feature_flags.dart';
 import 'core/logger.dart';
 import 'features/auth/login_page.dart';
-import 'features/exchanges/exchange_status_page.dart';
 import 'features/home/home_page.dart';
 import 'features/messages/message_store.dart';
 import 'features/messages/messages_page.dart';
@@ -284,8 +284,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
     final messaging = FirebaseMessaging.instance;
 
-    final settings =
-        await messaging.requestPermission(alert: true, badge: true, sound: true);
+    final settings = await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
     AppLogger.i(
       'permission status=${settings.authorizationStatus}',
       tag: 'Push',
@@ -488,6 +491,41 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
       return;
     }
+
+    if (type == 'parliament_roll_call') {
+      final top = (data['top'] ?? '').toString();
+      final titleText = (data['title'] ?? '').toString();
+      _showTransientBanner(
+        title: 'Namentliche Abstimmung in Kürze',
+        body: [top, titleText].where((part) => part.isNotEmpty).join(' • '),
+        color: const Color(0xFFB51C2D),
+        targetTab: 0,
+      );
+
+      if (openedByTap && mounted) {
+        setState(() => index = 0);
+      }
+
+      return;
+    }
+
+    if (type == 'parliament_speech') {
+      final titleText = (data['title'] ?? '').toString();
+      _showTransientBanner(
+        title: 'Rede in Kürze',
+        body: titleText.isEmpty
+            ? 'Deine nächste Rede beginnt bald.'
+            : titleText,
+        color: const Color(0xFF6F4D57),
+        targetTab: 0,
+      );
+
+      if (openedByTap && mounted) {
+        setState(() => index = 0);
+      }
+
+      return;
+    }
   }
 
   @override
@@ -558,7 +596,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             liveUnreadCount: unreadCount,
           ),
           SlotsPage(key: ValueKey(slotsReloadKey), meStore: meStore),
-          ExchangeStatusPage(meStore: meStore),
+          const _DisabledFeaturePage(
+            title: 'Tausch',
+            message:
+                'Das Tauschtool bleibt vorerst deaktiviert und wird später freigeschaltet.',
+          ),
           MessagesPage(
             store: messageStore,
             api: api,
@@ -683,6 +725,15 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             labelBehavior: NavigationDestinationLabelBehavior.onlyShowSelected,
             selectedIndex: index,
             onDestinationSelected: (i) async {
+              if (i == 2 && !exchangesEnabled) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Das Tauschtool wird später freigeschaltet.'),
+                  ),
+                );
+                return;
+              }
+
               if (i == 1) {
                 setState(() {
                   index = i;
@@ -694,7 +745,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
               if (i == 3) {
                 // Refresh messages when user opens the tab (tab stays alive, so initState won't re-run).
-                await messageStore.loadFromApi(api, userId: meStore.userIdOrThrow);
+                await messageStore.loadFromApi(
+                  api,
+                  userId: meStore.userIdOrThrow,
+                );
                 await _loadUnreadCount();
                 messageStore.clearUrgentBanner();
                 await _markAllMessagesAsRead();
@@ -709,8 +763,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 icon: Icon(Icons.calendar_month),
                 label: 'Dienstplan',
               ),
-              const NavigationDestination(
-                icon: Icon(Icons.swap_horiz),
+              NavigationDestination(
+                icon: Icon(
+                  Icons.swap_horiz,
+                  color: exchangesEnabled ? null : Colors.grey,
+                ),
                 label: 'Tausch',
               ),
               NavigationDestination(
@@ -758,6 +815,46 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           ),
         );
       },
+    );
+  }
+}
+
+class _DisabledFeaturePage extends StatelessWidget {
+  const _DisabledFeaturePage({required this.title, required this.message});
+
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.lock_clock_outlined,
+                    size: 42,
+                    color: Colors.grey.shade600,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    message,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey.shade700),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

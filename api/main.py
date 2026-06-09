@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import base64
+from email import message_from_bytes
+from email.header import decode_header
+import html
+import imaplib
+from io import BytesIO
 import json
 import os
 import re
 import random
+import threading
 from datetime import date
 from typing import Optional, Literal
 from uuid import UUID
+from zoneinfo import ZoneInfo
+import xml.etree.ElementTree as ET
 
 import firebase_admin
 from firebase_admin import credentials, messaging
@@ -20,8 +28,10 @@ from fastapi import UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
+import requests
+import certifi
+from pypdf import PdfReader
 import uuid
-import shutil
 from planner_engine import (
     ExistingAssignment as PlannerExistingAssignment,
     PlannerPerson,
@@ -35,6 +45,23 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "spd-fraktion-intern")
+EUROPE_BERLIN = ZoneInfo("Europe/Berlin")
+BUNDESTAG_CONFERENCES_URL = "https://www.bundestag.de/static/appdata/plenum/v2/conferences.xml"
+BUNDESTAG_SPEAKER_URL = "https://www.bundestag.de/static/appdata/plenum/v2/speaker.xml"
+BUNDESTAG_ARTICLE_XML_URL = "https://www.bundestag.de/blueprint/servlet/content/{article_id}/asAppV2NewsarticleXml"
+BUNDESTAG_TAGESORDNUNGEN_URL = "https://www.bundestag.de/parlament/plenum/tagesordnungen"
+BUNDESTAG_LIVE_CACHE_SECONDS = 60
+_bundestag_live_cache_lock = threading.Lock()
+_bundestag_live_cache: dict[str, tuple[datetime, str]] = {}
+_bundestag_live_bytes_cache: dict[str, tuple[datetime, bytes]] = {}
+MAIL_IMPORT_IMAP_HOST = os.environ.get("MAIL_IMPORT_IMAP_HOST", "imap.strato.de")
+MAIL_IMPORT_IMAP_PORT = int(os.environ.get("MAIL_IMPORT_IMAP_PORT", "993"))
+MAIL_IMPORT_USERNAME = os.environ.get("MAIL_IMPORT_USERNAME", "").strip()
+MAIL_IMPORT_PASSWORD = os.environ.get("MAIL_IMPORT_PASSWORD", "").strip()
+MAIL_IMPORT_LOOKBACK_DAYS = int(os.environ.get("MAIL_IMPORT_LOOKBACK_DAYS", "14"))
+PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES = int(
+    os.environ.get("PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES", "60")
+)
 
 
 def _load_firebase_credentials():
@@ -1734,6 +1761,557 @@ def ensure_temporary_pgf_grants_table():
         conn.commit()
 
 
+def _parse_bundestag_timestamp(value: str | None) -> datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y%m%d%H%M%S").replace(tzinfo=EUROPE_BERLIN)
+    except ValueError:
+        return None
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Parameter 'at' muss ISO-8601 sein, z. B. 2026-06-11T15:45:00+02:00",
+        ) from exc
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=EUROPE_BERLIN)
+    return parsed.astimezone(EUROPE_BERLIN)
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _bundestag_fetch_xml(url: str) -> str:
+    now = datetime.now(timezone.utc)
+    with _bundestag_live_cache_lock:
+        cached = _bundestag_live_cache.get(url)
+        if cached and (now - cached[0]).total_seconds() < BUNDESTAG_LIVE_CACHE_SECONDS:
+            return cached[1]
+
+    try:
+        resp = requests.get(url, timeout=15, verify=certifi.where())
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bundestag-Live-Daten konnten nicht geladen werden: {exc}",
+        ) from exc
+
+    text = resp.text
+    with _bundestag_live_cache_lock:
+        _bundestag_live_cache[url] = (now, text)
+    return text
+
+
+def _bundestag_fetch_bytes(url: str) -> bytes:
+    now = datetime.now(timezone.utc)
+    with _bundestag_live_cache_lock:
+        cached = _bundestag_live_bytes_cache.get(url)
+        if cached and (now - cached[0]).total_seconds() < BUNDESTAG_LIVE_CACHE_SECONDS:
+            return cached[1]
+
+    try:
+        resp = requests.get(url, timeout=20, verify=certifi.where())
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bundestag-Dokument konnte nicht geladen werden: {exc}",
+        ) from exc
+
+    content = resp.content
+    with _bundestag_live_cache_lock:
+        _bundestag_live_bytes_cache[url] = (now, content)
+    return content
+
+
+def _bundestag_xml_text(parent: ET.Element, tag: str) -> str:
+    child = parent.find(tag)
+    if child is None or child.text is None:
+        return ""
+    return child.text.strip()
+
+
+def _parse_bundestag_conferences() -> list[dict]:
+    xml_text = _bundestag_fetch_xml(BUNDESTAG_CONFERENCES_URL)
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bundestag-Live-Daten sind ungueltig formatiert: {exc}",
+        ) from exc
+
+    sessions: list[dict] = []
+    for session_el in root.findall("tagesordnung"):
+        points: list[dict] = []
+        for point_el in session_el.findall("./diskussionspunkte/diskussionspunkt"):
+            start_at = _parse_bundestag_timestamp(_bundestag_xml_text(point_el, "startzeit"))
+            end_at = _parse_bundestag_timestamp(_bundestag_xml_text(point_el, "endzeit"))
+            points.append(
+                {
+                    "start_at": start_at,
+                    "end_at": end_at,
+                    "status": _bundestag_xml_text(point_el, "status"),
+                    "title": _bundestag_xml_text(point_el, "titel"),
+                    "article_id": _bundestag_xml_text(point_el, "articleId") or None,
+                    "top": _bundestag_xml_text(point_el, "top") or None,
+                }
+            )
+
+        session_date_text = _bundestag_xml_text(session_el, "date")
+        session_date = None
+        if session_date_text:
+            try:
+                session_date = datetime.strptime(session_date_text, "%d.%m.%Y").date()
+            except ValueError:
+                session_date = None
+
+        sessions.append(
+            {
+                "date": session_date,
+                "date_text": session_date_text or None,
+                "active": _bundestag_xml_text(session_el, "active") == "1",
+                "session_number": _bundestag_xml_text(session_el, "sitzungsnummer") or None,
+                "name": _bundestag_xml_text(session_el, "name") or None,
+                "points": points,
+            }
+        )
+
+    return sessions
+
+
+def _parse_bundestag_speaker() -> dict:
+    xml_text = _bundestag_fetch_xml(BUNDESTAG_SPEAKER_URL)
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bundestag-Sprecherdaten sind ungueltig formatiert: {exc}",
+        ) from exc
+
+    speakers: list[dict] = []
+    speakers_parent = root.find("speakers")
+    if speakers_parent is not None:
+        for speaker_el in speakers_parent.findall("speaker"):
+            speakers.append(
+                {
+                    "name": _bundestag_xml_text(speaker_el, "name") or None,
+                    "party": _bundestag_xml_text(speaker_el, "party") or None,
+                    "function": _bundestag_xml_text(speaker_el, "function") or None,
+                }
+            )
+
+    return {
+        "live": _bundestag_xml_text(root, "live").lower() == "true",
+        "topic_number": _bundestag_xml_text(root, "topicNumber") or None,
+        "speakers": speakers,
+    }
+
+
+def _parse_bundestag_article_detail(article_id: str) -> dict | None:
+    normalized_id = (article_id or "").strip()
+    if not normalized_id:
+        return None
+
+    xml_text = _bundestag_fetch_xml(
+        BUNDESTAG_ARTICLE_XML_URL.format(article_id=normalized_id)
+    )
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+
+    return {
+        "article_id": normalized_id,
+        "title": _bundestag_xml_text(root, "title") or None,
+        "date": _bundestag_xml_text(root, "date") or None,
+        "source_url": _bundestag_xml_text(root, "sourceURL") or None,
+        "text_html": _bundestag_xml_text(root, "text") or "",
+    }
+
+
+def _strip_html_text(value: str) -> str:
+    text = re.sub(r"<br\s*/?>", " ", value, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _article_mentions_roll_call(article_detail: dict | None) -> bool:
+    if not article_detail:
+        return False
+
+    haystacks = [
+        (article_detail.get("title") or "").lower(),
+        _strip_html_text(article_detail.get("text_html") or "").lower(),
+    ]
+    return any("namentlich" in item for item in haystacks)
+
+
+def _find_ablaufplan_pdf_url() -> str | None:
+    html_text = _bundestag_fetch_xml(BUNDESTAG_TAGESORDNUNGEN_URL)
+    match = re.search(
+        r'href="(https://www\.bundestag\.de/resource/blob/[^"]+/Ablaufplan-[^"]+\.pdf)"',
+        html_text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return html.unescape(match.group(1))
+
+
+def _parse_ablaufplan_roll_calls() -> list[dict]:
+    pdf_url = _find_ablaufplan_pdf_url()
+    if not pdf_url:
+        return []
+
+    pdf_bytes = _bundestag_fetch_bytes(pdf_url)
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception:
+        return []
+
+    date_map = {
+        "Januar": 1,
+        "Februar": 2,
+        "März": 3,
+        "April": 4,
+        "Mai": 5,
+        "Juni": 6,
+        "Juli": 7,
+        "August": 8,
+        "September": 9,
+        "Oktober": 10,
+        "November": 11,
+        "Dezember": 12,
+    }
+
+    roll_calls: list[dict] = []
+    current_date = None
+    last_row = None
+
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+
+        date_match = re.match(
+            r"^(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag), (\d{1,2})\. ([A-Za-zÄÖÜäöüß]+) (\d{4})",
+            line,
+        )
+        if date_match:
+            day = int(date_match.group(2))
+            month = date_map.get(date_match.group(3))
+            year = int(date_match.group(4))
+            if month:
+                current_date = date(year, month, day)
+            continue
+
+        row_match = re.match(
+            r"^(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2}) Uhr .*? TOP ([A-Z0-9 ,]+?) (.+)$",
+            line,
+        )
+        if row_match and current_date is not None:
+            start_hhmm, end_hhmm, top, title = row_match.groups()
+            start_hour, start_minute = map(int, start_hhmm.split(":"))
+            end_hour, end_minute = map(int, end_hhmm.split(":"))
+            last_row = {
+                "top": f"TOP {top.strip()}",
+                "title": title.strip(),
+                "start_at": datetime(
+                    current_date.year,
+                    current_date.month,
+                    current_date.day,
+                    start_hour,
+                    start_minute,
+                    tzinfo=EUROPE_BERLIN,
+                ),
+                "end_at": datetime(
+                    current_date.year,
+                    current_date.month,
+                    current_date.day,
+                    end_hour,
+                    end_minute,
+                    tzinfo=EUROPE_BERLIN,
+                ),
+                "pdf_url": pdf_url,
+            }
+            continue
+
+        if last_row and "Namentliche Abstimmung" in line:
+            detail = dict(last_row)
+            detail["note"] = line
+            duration_match = re.search(r"(\d+)\s*Minuten", line, re.IGNORECASE)
+            if duration_match:
+                detail["duration_minutes"] = int(duration_match.group(1))
+            location_match = re.search(r",\s*([^,]+)\.?$", line)
+            if location_match:
+                detail["location"] = location_match.group(1).strip().rstrip(".")
+            roll_calls.append(detail)
+            last_row = None
+
+    return roll_calls
+
+
+def _point_effective_end(point: dict) -> datetime | None:
+    end_at = point.get("end_at")
+    start_at = point.get("start_at")
+    if end_at and start_at and end_at < start_at:
+        return start_at
+    return end_at or start_at
+
+
+def _find_current_and_next_point(
+    sessions: list[dict],
+    effective_at: datetime,
+) -> tuple[dict | None, dict | None, dict | None]:
+    current_session = None
+    current_point = None
+    next_point = None
+
+    flat_points: list[tuple[dict, dict]] = []
+    for session in sessions:
+        for point in session["points"]:
+            if point.get("start_at") is None:
+                continue
+            flat_points.append((session, point))
+
+    flat_points.sort(key=lambda item: item[1]["start_at"])
+
+    for index, (session, point) in enumerate(flat_points):
+        start_at = point.get("start_at")
+        end_at = _point_effective_end(point)
+        if start_at is None:
+            continue
+
+        if end_at and start_at <= effective_at < end_at:
+            current_session = session
+            current_point = point
+            if index + 1 < len(flat_points):
+                next_point = flat_points[index + 1][1]
+            break
+
+        if start_at > effective_at:
+            next_point = point
+            break
+
+    if current_session is None and current_point is None and next_point is not None:
+        for session, point in flat_points:
+            if point is next_point:
+                current_session = session
+                break
+
+    return current_session, current_point, next_point
+
+
+def _serialize_parliament_point(point: dict | None) -> dict | None:
+    if point is None:
+        return None
+    return {
+        "top": point.get("top"),
+        "title": point.get("title"),
+        "status": point.get("status"),
+        "article_id": point.get("article_id"),
+        "start_at": _iso_or_none(point.get("start_at")),
+        "end_at": _iso_or_none(point.get("end_at")),
+    }
+
+
+def _find_next_roll_call_point(
+    sessions: list[dict],
+    effective_at: datetime,
+) -> dict | None:
+    roll_call_schedule = _parse_ablaufplan_roll_calls()
+    schedule_by_top: dict[str, dict] = {}
+    for item in roll_call_schedule:
+        top_key = (item.get("top") or "").strip().upper()
+        if top_key:
+            schedule_by_top[top_key] = item
+
+    candidates: list[dict] = []
+    for session in sessions:
+        for point in session["points"]:
+            article_id = point.get("article_id")
+            start_at = point.get("start_at")
+            end_at = _point_effective_end(point)
+            if not article_id or start_at is None or end_at is None:
+                continue
+            if end_at < effective_at:
+                continue
+
+            detail = _parse_bundestag_article_detail(article_id)
+            if not _article_mentions_roll_call(detail):
+                continue
+
+            candidate = dict(point)
+            candidate["article_detail"] = detail
+            schedule = schedule_by_top.get((point.get("top") or "").strip().upper())
+            if schedule:
+                candidate["roll_call_schedule"] = schedule
+            candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    def candidate_start(item: dict) -> datetime:
+        schedule = item.get("roll_call_schedule") or {}
+        return schedule.get("start_at") or item["start_at"]
+
+    filtered = [
+        item
+        for item in candidates
+        if (_point_effective_end(item.get("roll_call_schedule") or item) or item["start_at"]) >= effective_at
+    ]
+    if filtered:
+        candidates = filtered
+
+    candidates.sort(key=candidate_start)
+    return candidates[0]
+
+
+def _serialize_roll_call(point: dict | None) -> dict | None:
+    if point is None:
+        return None
+
+    detail = point.get("article_detail") or {}
+    schedule = point.get("roll_call_schedule") or {}
+    return {
+        "top": point.get("top"),
+        "title": point.get("title"),
+        "article_id": point.get("article_id"),
+        "start_at": _iso_or_none(schedule.get("start_at") or point.get("start_at")),
+        "end_at": _iso_or_none(schedule.get("end_at") or point.get("end_at")),
+        "duration_minutes": schedule.get("duration_minutes"),
+        "location": schedule.get("location"),
+        "schedule_note": schedule.get("note"),
+        "pdf_url": schedule.get("pdf_url"),
+        "source_url": detail.get("source_url"),
+        "article_title": detail.get("title"),
+    }
+
+
+def _serialize_service_slot(slot: dict | None) -> dict | None:
+    if slot is None:
+        return None
+    return {
+        "slot_id": str(slot["slot_id"]),
+        "date": slot["date"].isoformat() if isinstance(slot.get("date"), date) else str(slot.get("date")),
+        "weekday": slot.get("weekday"),
+        "slot_code": slot.get("slot_code"),
+        "start_time": slot.get("start_time").isoformat() if slot.get("start_time") else None,
+        "end_time": slot.get("end_time").isoformat() if slot.get("end_time") else None,
+        "assignment_type": _normalise_assignment_type(slot.get("assignment_type")),
+    }
+
+
+def _lookup_next_assigned_slot_for_user(
+    user_id: str,
+    *,
+    effective_at: datetime,
+) -> dict | None:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.slot_date,
+                    s.weekday,
+                    s.slot_code,
+                    s.start_time,
+                    s.end_time,
+                    sa.assignment_type
+                FROM slot_assignments sa
+                JOIN duty_slots s
+                  ON s.id = sa.slot_id
+                WHERE sa.user_id = %s
+                  AND (s.slot_date::timestamp + s.start_time) >= %s
+                ORDER BY s.slot_date ASC, s.start_time ASC
+                LIMIT 1
+                """,
+                (user_id, effective_at.replace(tzinfo=None)),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "slot_id": row[0],
+        "date": row[1],
+        "weekday": row[2],
+        "slot_code": row[3],
+        "start_time": row[4],
+        "end_time": row[5],
+        "assignment_type": row[6],
+    }
+
+
+def _build_parliament_live_payload(at: datetime | None = None) -> dict:
+    speaker = _parse_bundestag_speaker()
+    sessions = _parse_bundestag_conferences()
+    effective_at = at or datetime.now(EUROPE_BERLIN)
+    current_session, current_point, next_point = _find_current_and_next_point(
+        sessions,
+        effective_at,
+    )
+    next_roll_call = _find_next_roll_call_point(sessions, effective_at)
+
+    session_running = current_point is not None
+    if at is None and speaker["live"]:
+        session_running = True
+
+    return {
+        "mode": "simulated" if at else "live",
+        "source": {
+            "conferences_url": BUNDESTAG_CONFERENCES_URL,
+            "speaker_url": BUNDESTAG_SPEAKER_URL,
+            "cache_ttl_seconds": BUNDESTAG_LIVE_CACHE_SECONDS,
+        },
+        "generated_at": datetime.now(EUROPE_BERLIN).isoformat(),
+        "effective_at": effective_at.isoformat(),
+        "speaker_live": speaker["live"],
+        "speaker_topic_number": speaker["topic_number"],
+        "speaker_names": [item["name"] for item in speaker["speakers"] if item.get("name")],
+        "session_running": session_running,
+        "current_session": {
+            "date": current_session.get("date").isoformat() if current_session and current_session.get("date") else None,
+            "date_text": current_session.get("date_text") if current_session else None,
+            "session_number": current_session.get("session_number") if current_session else None,
+            "name": current_session.get("name") if current_session else None,
+            "active": bool(current_session.get("active")) if current_session else False,
+        }
+        if current_session
+        else None,
+        "current_top": _serialize_parliament_point(current_point),
+        "next_top": _serialize_parliament_point(next_point),
+        "next_roll_call": _serialize_roll_call(next_roll_call),
+        "agenda_points": [
+            _serialize_parliament_point(point)
+            for point in (current_session.get("points") if current_session else [])
+        ],
+    }
+
+
 def _user_can_manage_slot_attendance(
     cur,
     *,
@@ -2122,6 +2700,18 @@ class DebugPush(BaseModel):
     urgency: Literal["information", "mittel", "hoch"] = "information"
 
 
+class FeedbackCreate(BaseModel):
+    kind: Literal["improvement", "error", "general"] = "improvement"
+    title: str
+    content: str
+    context: str | None = None
+
+
+class FeedbackUpdate(BaseModel):
+    status: Literal["open", "in_review", "done", "dismissed"]
+    admin_note: str | None = None
+
+
 def send_attendance_reminders():
     now = datetime.now(timezone.utc)
 
@@ -2208,37 +2798,172 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/debug/attendance-reminders")
-def debug_attendance_reminders(authorization: str | None = Header(default=None)):
-    require_admin(authorization)
-    if not _debug_endpoint_enabled():
-        raise HTTPException(status_code=404, detail="Not found")
-    return send_attendance_reminders()
+@app.get("/parliament/live")
+def parliament_live(at: str | None = Query(default=None)):
+    effective_at = _parse_iso_datetime(at) if at else None
+    return _build_parliament_live_payload(at=effective_at)
 
-@app.post("/documents/upload")
-def upload_document(
-    title: str = Form(...),
-    category: str = Form(...),
-    recipient_user_ids: str = Form(...),  # JSON string
-    file: UploadFile = File(...),
+
+@app.get("/me/live-info")
+def get_my_live_info(
+    at: str | None = Query(default=None),
     authorization: str | None = Header(default=None),
 ):
-    user = get_current_user_from_firebase(authorization)
-    ensure_message_recipient_table()
+    scope = _resolve_actor_scope(authorization)
+    actor = scope["actor"]
+    principal = scope["principal"]
+    effective_at = _parse_iso_datetime(at) if at else None
+    payload = _build_parliament_live_payload(at=effective_at)
+    comparison_at = effective_at or datetime.now(EUROPE_BERLIN)
 
-    if user["role"] not in ("admin", "pgf"):
-        raise HTTPException(status_code=403, detail="Not allowed")
+    next_pgf_duty = None
+    if actor["role"] == "pgf":
+        next_pgf_duty = _serialize_service_slot(
+            _lookup_next_assigned_slot_for_user(
+                actor["id"],
+                effective_at=comparison_at,
+            )
+        )
 
+    payload["viewer"] = {
+        "user_id": actor["id"],
+        "role": actor["role"],
+        "principal_user_id": principal["id"],
+        "principal_name": " ".join(
+            [part for part in [principal.get("first_name"), principal.get("last_name")] if part]
+        ).strip()
+        or principal.get("email")
+        or principal["id"],
+    }
+    payload["next_pgf_duty"] = next_pgf_duty
+    payload["next_speech"] = None
+    payload["next_speech_source"] = "not_available_yet"
+    return payload
+
+
+def ensure_mail_import_tables():
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mail_import_events (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    mailbox_uid TEXT NOT NULL,
+                    message_id TEXT,
+                    subject TEXT NOT NULL,
+                    attachment_name TEXT NOT NULL,
+                    attachment_category TEXT NOT NULL,
+                    document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
+                    imported_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE (mailbox_uid, attachment_name, attachment_category)
+                )
+                """
+            )
+        conn.commit()
+
+
+def _decode_mime_header(value: str | None) -> str:
+    if not value:
+        return ""
+
+    parts = []
+    for item, encoding in decode_header(value):
+        if isinstance(item, bytes):
+            parts.append(item.decode(encoding or "utf-8", errors="replace"))
+        else:
+            parts.append(item)
+    return "".join(parts).strip()
+
+
+def _mail_import_enabled() -> bool:
+    return bool(MAIL_IMPORT_USERNAME and MAIL_IMPORT_PASSWORD)
+
+
+def _all_active_user_ids() -> list[str]:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id::text
+                FROM users
+                WHERE COALESCE(is_active, true) = true
+                ORDER BY
+                    COALESCE(last_name, '') ASC,
+                    COALESCE(first_name, '') ASC,
+                    email ASC
+                """
+            )
+            return [row[0] for row in cur.fetchall()]
+
+
+def _resolve_document_recipient_ids(scope: str) -> list[str]:
+    normalized_scope = (scope or "").strip().lower()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            if normalized_scope == "all":
+                cur.execute(
+                    """
+                    SELECT id::text
+                    FROM users
+                    WHERE COALESCE(is_active, true) = true
+                    ORDER BY
+                        COALESCE(last_name, '') ASC,
+                        COALESCE(first_name, '') ASC,
+                        email ASC
+                    """
+                )
+            elif normalized_scope == "mdb":
+                cur.execute(
+                    """
+                    SELECT id::text
+                    FROM users
+                    WHERE COALESCE(is_active, true) = true
+                      AND (
+                        role = 'mdb'
+                        OR COALESCE(is_mdb, false) = true
+                      )
+                    ORDER BY
+                        COALESCE(last_name, '') ASC,
+                        COALESCE(first_name, '') ASC,
+                        email ASC
+                    """
+                )
+            elif normalized_scope == "pgf":
+                cur.execute(
+                    """
+                    SELECT id::text
+                    FROM users
+                    WHERE COALESCE(is_active, true) = true
+                      AND role = 'pgf'
+                    ORDER BY
+                        COALESCE(last_name, '') ASC,
+                        COALESCE(first_name, '') ASC,
+                        email ASC
+                    """
+                )
+            else:
+                raise HTTPException(status_code=400, detail="Ungültiger Empfängerkreis")
+
+            return [row[0] for row in cur.fetchall()]
+
+
+def _persist_document_record(
+    *,
+    title: str,
+    category: str,
+    original_filename: str,
+    mime_type: str | None,
+    content_bytes: bytes,
+    recipient_ids: list[str],
+    uploaded_by_user_id: str | None = None,
+):
     file_id = str(uuid.uuid4())
-    stored_filename = f"{file_id}_{file.filename}"
+    stored_filename = f"{file_id}_{original_filename}"
     file_path = os.path.join(UPLOAD_DIR, stored_filename)
 
-    # Datei speichern
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    import json
-    recipient_ids = json.loads(recipient_user_ids)
+        buffer.write(content_bytes)
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -2254,26 +2979,22 @@ def upload_document(
                     file_size,
                     uploaded_by_user_id
                 )
-                VALUES (
-                    %s,%s,%s,%s,%s,%s,%s,%s
-                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 RETURNING id
                 """,
                 (
                     file_id,
                     title,
-                    file.filename,
+                    original_filename,
                     stored_filename,
-                    file.content_type,
+                    mime_type,
                     category,
-                    None,
-                    user["id"],
+                    len(content_bytes),
+                    uploaded_by_user_id,
                 ),
             )
-
             doc_id = cur.fetchone()[0]
 
-            # Empfänger
             for uid in recipient_ids:
                 cur.execute(
                     """
@@ -2283,8 +3004,18 @@ def upload_document(
                     """,
                     (doc_id, uid),
                 )
-
         conn.commit()
+
+    return str(doc_id)
+
+
+def _notify_new_document(
+    *,
+    title: str,
+    recipient_ids: list[str],
+):
+    if not recipient_ids:
+        return
 
     message_content = f"Neue Datei verfugbar: {title}"
     msg_id, _ = create_message(
@@ -2309,9 +3040,574 @@ def upload_document(
             },
         )
     except Exception as e:
-        print(f"DOCUMENT PUSH FAILED doc_id={file_id} error={e}", flush=True)
+        print(f"DOCUMENT PUSH FAILED title={title} error={e}", flush=True)
 
-    return {"id": file_id}
+
+def _classify_mail_attachment(subject: str, filename: str) -> str | None:
+    normalized_filename = (
+        filename.lower()
+        .replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+    if (
+        "kurzuebersicht" in normalized_filename
+        or "aktuelle kue" in normalized_filename
+        or re.search(r"(^|[^a-z])kue([^a-z]|$)", normalized_filename)
+    ):
+        return "kurzuebersicht"
+    return None
+
+
+def _build_import_title(category: str, subject: str, filename: str) -> str:
+    cleaned_subject = re.sub(r"\s+", " ", subject).strip()
+    cleaned_filename = re.sub(r"\.[^.]+$", "", filename).strip()
+    if category == "kurzuebersicht":
+        return cleaned_filename or cleaned_subject or "Kurzübersicht"
+    return cleaned_subject or cleaned_filename or "Datei aus Mailimport"
+
+
+def _attachment_already_imported(
+    *,
+    mailbox_uid: str,
+    attachment_name: str,
+    attachment_category: str,
+) -> bool:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM mail_import_events
+                WHERE mailbox_uid = %s
+                  AND attachment_name = %s
+                  AND attachment_category = %s
+                LIMIT 1
+                """,
+                (mailbox_uid, attachment_name, attachment_category),
+            )
+            return cur.fetchone() is not None
+
+
+def _record_mail_import_event(
+    *,
+    mailbox_uid: str,
+    message_id: str | None,
+    subject: str,
+    attachment_name: str,
+    attachment_category: str,
+    document_id: str,
+):
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mail_import_events (
+                    mailbox_uid,
+                    message_id,
+                    subject,
+                    attachment_name,
+                    attachment_category,
+                    document_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (mailbox_uid, attachment_name, attachment_category) DO NOTHING
+                """,
+                (
+                    mailbox_uid,
+                    message_id,
+                    subject,
+                    attachment_name,
+                    attachment_category,
+                    document_id,
+                ),
+            )
+        conn.commit()
+
+
+def run_mail_import_once():
+    ensure_mail_import_tables()
+
+    if not _mail_import_enabled():
+        raise HTTPException(
+            status_code=500,
+            detail="Mail-Import ist nicht konfiguriert. MAIL_IMPORT_USERNAME und MAIL_IMPORT_PASSWORD fehlen.",
+        )
+
+    recipient_ids = _all_active_user_ids()
+    if not recipient_ids:
+        return {"processed_messages": 0, "imported_documents": 0, "imported": []}
+
+    imported: list[dict] = []
+    processed_messages = 0
+    since_date = (datetime.now(EUROPE_BERLIN) - timedelta(days=MAIL_IMPORT_LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+
+    with imaplib.IMAP4_SSL(MAIL_IMPORT_IMAP_HOST, MAIL_IMPORT_IMAP_PORT) as imap:
+        imap.login(MAIL_IMPORT_USERNAME, MAIL_IMPORT_PASSWORD)
+        imap.select("INBOX")
+        status, data = imap.uid("search", None, f'(SINCE "{since_date}")')
+        if status != "OK":
+            raise HTTPException(status_code=502, detail="IMAP-Suche fehlgeschlagen")
+
+        uids = [item for item in (data[0] or b"").split() if item]
+        for uid_bytes in uids[-50:]:
+            mailbox_uid = uid_bytes.decode("utf-8", errors="ignore")
+            fetch_status, fetch_data = imap.uid("fetch", uid_bytes, "(RFC822)")
+            if fetch_status != "OK" or not fetch_data:
+                continue
+
+            raw_email = None
+            for part in fetch_data:
+                if isinstance(part, tuple) and len(part) > 1:
+                    raw_email = part[1]
+                    break
+            if raw_email is None:
+                continue
+
+            processed_messages += 1
+            msg = message_from_bytes(raw_email)
+            subject = _decode_mime_header(msg.get("Subject"))
+
+            message_id = (msg.get("Message-ID") or "").strip() or None
+
+            for part in msg.walk():
+                if part.get_content_maintype() == "multipart":
+                    continue
+
+                filename = _decode_mime_header(part.get_filename())
+                if not filename:
+                    continue
+
+                category = _classify_mail_attachment(subject, filename)
+                if not category:
+                    continue
+
+                if _attachment_already_imported(
+                    mailbox_uid=mailbox_uid,
+                    attachment_name=filename,
+                    attachment_category=category,
+                ):
+                    continue
+
+                payload = part.get_payload(decode=True) or b""
+                if not payload:
+                    continue
+
+                mime_type = part.get_content_type() or "application/octet-stream"
+                title = _build_import_title(category, subject, filename)
+                document_id = _persist_document_record(
+                    title=title,
+                    category=category,
+                    original_filename=filename,
+                    mime_type=mime_type,
+                    content_bytes=payload,
+                    recipient_ids=recipient_ids,
+                    uploaded_by_user_id=None,
+                )
+                _record_mail_import_event(
+                    mailbox_uid=mailbox_uid,
+                    message_id=message_id,
+                    subject=subject,
+                    attachment_name=filename,
+                    attachment_category=category,
+                    document_id=document_id,
+                )
+                _notify_new_document(
+                    title=title,
+                    recipient_ids=recipient_ids,
+                )
+                imported.append(
+                    {
+                        "document_id": document_id,
+                        "category": category,
+                        "title": title,
+                        "filename": filename,
+                        "mailbox_uid": mailbox_uid,
+                    }
+                )
+
+    return {
+        "processed_messages": processed_messages,
+        "imported_documents": len(imported),
+        "imported": imported,
+    }
+
+
+def ensure_parliament_reminder_tables():
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parliament_reminders_sent (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    reminder_type TEXT NOT NULL,
+                    reminder_key TEXT NOT NULL,
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    UNIQUE(reminder_type, reminder_key, user_id)
+                )
+                """
+            )
+        conn.commit()
+
+
+def _parliament_reminder_already_sent(
+    *,
+    reminder_type: str,
+    reminder_key: str,
+    user_id: str,
+) -> bool:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM parliament_reminders_sent
+                WHERE reminder_type = %s
+                  AND reminder_key = %s
+                  AND user_id = %s
+                LIMIT 1
+                """,
+                (reminder_type, reminder_key, user_id),
+            )
+            return cur.fetchone() is not None
+
+
+def _record_parliament_reminder_sent(
+    *,
+    reminder_type: str,
+    reminder_key: str,
+    user_id: str,
+):
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO parliament_reminders_sent (
+                    reminder_type,
+                    reminder_key,
+                    user_id
+                )
+                VALUES (%s, %s, %s)
+                ON CONFLICT (reminder_type, reminder_key, user_id) DO NOTHING
+                """,
+                (reminder_type, reminder_key, user_id),
+            )
+        conn.commit()
+
+
+def _push_targets_for_active_users() -> list[tuple[str, list[str]]]:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    u.id::text,
+                    array_agg(DISTINCT upt.token ORDER BY upt.token) AS tokens
+                FROM users u
+                JOIN user_push_tokens upt
+                  ON upt.user_id = u.id
+                WHERE COALESCE(u.is_active, true) = true
+                GROUP BY u.id
+                """
+            )
+            rows = cur.fetchall()
+
+    return [(row[0], [token for token in (row[1] or []) if token]) for row in rows]
+
+
+def send_parliament_reminders():
+    ensure_parliament_reminder_tables()
+
+    now = datetime.now(EUROPE_BERLIN)
+    lookahead_end = now + timedelta(minutes=PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES)
+    payload = _build_parliament_live_payload(at=now)
+    next_roll_call = payload.get("next_roll_call") or {}
+    reminders_sent: list[dict] = []
+
+    start_raw = next_roll_call.get("start_at")
+    if start_raw:
+        start_at = datetime.fromisoformat(start_raw)
+        if now <= start_at <= lookahead_end:
+            reminder_key = f"{next_roll_call.get('top') or 'no-top'}::{start_at.isoformat()}"
+            title = "Namentliche Abstimmung in Kürze"
+            body = " · ".join(
+                part
+                for part in [
+                    next_roll_call.get("top"),
+                    next_roll_call.get("title"),
+                    f"Start voraussichtlich {start_at.astimezone(EUROPE_BERLIN).strftime('%H:%M')} Uhr",
+                ]
+                if part
+            )
+
+            for user_id, tokens in _push_targets_for_active_users():
+                if not tokens:
+                    continue
+                if _parliament_reminder_already_sent(
+                    reminder_type="roll_call",
+                    reminder_key=reminder_key,
+                    user_id=user_id,
+                ):
+                    continue
+
+                send_push_to_tokens(
+                    tokens=tokens,
+                    title=title,
+                    body=body,
+                    data={
+                        "type": "parliament_roll_call",
+                        "top": next_roll_call.get("top") or "",
+                        "title": next_roll_call.get("title") or "",
+                        "start_at": start_at.isoformat(),
+                    },
+                )
+                _record_parliament_reminder_sent(
+                    reminder_type="roll_call",
+                    reminder_key=reminder_key,
+                    user_id=user_id,
+                )
+                reminders_sent.append(
+                    {
+                        "reminder_type": "roll_call",
+                        "user_id": user_id,
+                        "top": next_roll_call.get("top"),
+                        "start_at": start_at.isoformat(),
+                    }
+                )
+
+    return {
+        "now": now.isoformat(),
+        "lookahead_minutes": PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES,
+        "sent": reminders_sent,
+        "count": len(reminders_sent),
+    }
+
+
+def ensure_feedback_table():
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feedback_entries (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    title TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    context TEXT,
+                    admin_note TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_feedback_entries_status_created_at
+                ON feedback_entries(status, created_at DESC)
+                """
+            )
+        conn.commit()
+
+
+@app.post("/feedback")
+def create_feedback(
+    payload: FeedbackCreate,
+    authorization: str | None = Header(default=None),
+):
+    actor = get_current_user_from_firebase(authorization)
+    ensure_feedback_table()
+
+    title = payload.title.strip()
+    content = payload.content.strip()
+    context_value = payload.context.strip() if payload.context else None
+    if not title:
+        raise HTTPException(status_code=400, detail="Titel fehlt")
+    if not content:
+        raise HTTPException(status_code=400, detail="Inhalt fehlt")
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO feedback_entries (
+                    user_id,
+                    kind,
+                    title,
+                    content,
+                    context
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id, status, created_at
+                """,
+                (actor["id"], payload.kind, title, content, context_value),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    return {
+        "id": str(row[0]),
+        "status": row[1],
+        "created_at": row[2].isoformat() if row[2] else None,
+    }
+
+
+@app.get("/admin/feedback")
+def admin_list_feedback(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    ensure_feedback_table()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    f.id,
+                    f.kind,
+                    f.status,
+                    f.title,
+                    f.content,
+                    f.context,
+                    f.admin_note,
+                    f.created_at,
+                    f.updated_at,
+                    u.id,
+                    u.email,
+                    u.first_name,
+                    u.last_name,
+                    u.role
+                FROM feedback_entries f
+                JOIN users u
+                  ON u.id = f.user_id
+                ORDER BY
+                    CASE f.status
+                        WHEN 'open' THEN 0
+                        WHEN 'in_review' THEN 1
+                        WHEN 'done' THEN 2
+                        ELSE 3
+                    END,
+                    f.created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": str(r[0]),
+            "kind": r[1],
+            "status": r[2],
+            "title": r[3],
+            "content": r[4],
+            "context": r[5],
+            "admin_note": r[6],
+            "created_at": r[7].isoformat() if r[7] else None,
+            "updated_at": r[8].isoformat() if r[8] else None,
+            "user": {
+                "id": str(r[9]),
+                "email": r[10],
+                "first_name": r[11],
+                "last_name": r[12],
+                "role": r[13],
+            },
+        }
+        for r in rows
+    ]
+
+
+@app.patch("/admin/feedback/{feedback_id}")
+def admin_update_feedback(
+    feedback_id: UUID,
+    payload: FeedbackUpdate,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_feedback_table()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE feedback_entries
+                SET status = %s,
+                    admin_note = %s,
+                    updated_at = now()
+                WHERE id = %s
+                RETURNING id
+                """,
+                (payload.status, payload.admin_note, feedback_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Rückmeldung nicht gefunden")
+
+    return {"ok": True, "id": str(row[0])}
+
+
+@app.post("/debug/attendance-reminders")
+def debug_attendance_reminders(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    if not _debug_endpoint_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+    return send_attendance_reminders()
+
+
+@app.post("/admin/parliament-reminders/run")
+def admin_run_parliament_reminders(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    return send_parliament_reminders()
+
+@app.post("/documents/upload")
+def upload_document(
+    title: str = Form(...),
+    category: str = Form(...),
+    recipient_scope: str = Form(...),
+    recipient_user_ids: str | None = Form(default=None),
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+):
+    user = get_current_user_from_firebase(authorization)
+    ensure_message_recipient_table()
+
+    if user["role"] not in ("admin", "pgf"):
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    if recipient_scope:
+        recipient_ids = _resolve_document_recipient_ids(recipient_scope)
+    elif recipient_user_ids:
+        recipient_ids = json.loads(recipient_user_ids)
+    else:
+        raise HTTPException(status_code=400, detail="Empfängerkreis fehlt")
+
+    if not recipient_ids:
+        raise HTTPException(status_code=400, detail="Keine aktiven Empfänger gefunden")
+
+    file_bytes = file.file.read()
+    document_id = _persist_document_record(
+        title=title,
+        category=category,
+        original_filename=file.filename or "upload.bin",
+        mime_type=file.content_type,
+        content_bytes=file_bytes,
+        recipient_ids=recipient_ids,
+        uploaded_by_user_id=user["id"],
+    )
+    _notify_new_document(
+        title=title,
+        recipient_ids=recipient_ids,
+    )
+
+    return {"id": document_id}
+
+
+@app.post("/admin/mail-import/run")
+def admin_run_mail_import(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    return run_mail_import_once()
 
 # -----------------------------
 # Me

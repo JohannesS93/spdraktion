@@ -6,8 +6,10 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../core/api_client.dart';
 import '../../core/config.dart';
+import '../../core/feature_flags.dart';
 import '../attendance/attendance_stats_page.dart';
 import '../attendance/current_session_page.dart';
+import '../feedback/feedback_page.dart';
 import '../messages/message_compose_page.dart';
 import '../profile/me_store.dart';
 
@@ -123,10 +125,7 @@ class _HomePageState extends State<HomePage> {
                   return Row(
                     children: [
                       Expanded(
-                        child: _InfoRow(
-                          label: 'Push-Token',
-                          value: '…$tail',
-                        ),
+                        child: _InfoRow(label: 'Push-Token', value: '…$tail'),
                       ),
                       IconButton(
                         tooltip: 'Kopieren',
@@ -214,6 +213,7 @@ class _HomePageState extends State<HomePage> {
         unreadCount: 0,
         latestDocument: null,
         latestSummaryDocument: null,
+        liveInfo: null,
       );
     }
     return loadHome();
@@ -227,6 +227,7 @@ class _HomePageState extends State<HomePage> {
         unreadCount: 0,
         latestDocument: null,
         latestSummaryDocument: null,
+        liveInfo: null,
       );
     }
 
@@ -265,6 +266,8 @@ class _HomePageState extends State<HomePage> {
     final latestSummaryDocument = latestSummary.isEmpty
         ? null
         : latestSummary.first;
+    final liveInfo =
+        await api.getJson('/me/live-info') as Map<String, dynamic>?;
 
     return _HomeData(
       nextSlot: nextSlot,
@@ -272,6 +275,7 @@ class _HomePageState extends State<HomePage> {
       unreadCount: unreadRaw['unread_count'] as int,
       latestDocument: latestDocument,
       latestSummaryDocument: latestSummaryDocument,
+      liveInfo: liveInfo,
     );
   }
 
@@ -287,6 +291,7 @@ class _HomePageState extends State<HomePage> {
             unreadCount: 0,
             latestDocument: null,
             latestSummaryDocument: null,
+            liveInfo: null,
           ),
         );
       });
@@ -345,7 +350,20 @@ class _HomePageState extends State<HomePage> {
                         unreadCount: 0,
                         latestDocument: null,
                         latestSummaryDocument: null,
+                        liveInfo: null,
                       );
+                  final liveInfo = data.liveInfo;
+                  final sessionRunning = liveInfo?['session_running'] == true;
+                  final currentTop =
+                      liveInfo?['current_top'] as Map<String, dynamic>?;
+                  final nextTop =
+                      liveInfo?['next_top'] as Map<String, dynamic>?;
+                  final nextRollCall =
+                      liveInfo?['next_roll_call'] as Map<String, dynamic>?;
+                  final nextSpeech =
+                      liveInfo?['next_speech'] as Map<String, dynamic>?;
+                  final nextPgfDuty =
+                      liveInfo?['next_pgf_duty'] as Map<String, dynamic>?;
 
                   return RefreshIndicator(
                     onRefresh: refresh,
@@ -423,6 +441,17 @@ class _HomePageState extends State<HomePage> {
                           ],
                         ),
                         const SizedBox(height: 16),
+                        if (sessionRunning) ...[
+                          _SessionBanner(
+                            currentTop: _pointLabel(currentTop),
+                            nextTop: _pointLabel(nextTop),
+                            nextTopStart: _formatDateTime(
+                              nextTop?['start_at']?.toString(),
+                              timeOnly: true,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                        ],
                         Row(
                           children: [
                             Expanded(
@@ -453,6 +482,47 @@ class _HomePageState extends State<HomePage> {
                         ),
                         const SizedBox(height: 18),
                         _SectionTitle(
+                          title: 'Plenum aktuell',
+                          subtitle:
+                              'Live-Daten fuer namentliche Abstimmungen, Reden und PGF-Dienste',
+                        ),
+                        const SizedBox(height: 10),
+                        _InfoPanelCard(
+                          title: 'Naechste namentliche',
+                          headline: _pointLabel(nextRollCall),
+                          detail: nextRollCall == null
+                              ? 'Aktuell keine kommende namentliche Abstimmung erkannt'
+                              : _formatRollCallRange(nextRollCall),
+                          color: const Color(0xFFB51C2D),
+                          icon: Icons.how_to_vote_outlined,
+                        ),
+                        const SizedBox(height: 12),
+                        _InfoPanelCard(
+                          title: 'Naechste Rede',
+                          headline:
+                              (nextSpeech?['title'] ?? '').toString().isEmpty
+                              ? 'Noch keine Rede erkannt'
+                              : (nextSpeech?['title'] ?? '').toString(),
+                          detail: nextSpeech == null
+                              ? 'Die offizielle Redequelle ist aktuell noch nicht angebunden.'
+                              : _formatDateTime(
+                                  nextSpeech['start_at']?.toString(),
+                                ),
+                          color: const Color(0xFF6F4D57),
+                          icon: Icons.record_voice_over_outlined,
+                        ),
+                        if (isPgf) ...[
+                          const SizedBox(height: 12),
+                          _InfoPanelCard(
+                            title: 'Naechster PGF-Dienst',
+                            headline: _formatPgfDutyHeadline(nextPgfDuty),
+                            detail: _formatPgfDutyDetail(nextPgfDuty),
+                            color: const Color(0xFF39424E),
+                            icon: Icons.badge_outlined,
+                          ),
+                        ],
+                        const SizedBox(height: 18),
+                        _SectionTitle(
                           title: 'Schnellzugriff',
                           subtitle: 'Die wichtigsten Bereiche auf einen Blick',
                         ),
@@ -476,13 +546,28 @@ class _HomePageState extends State<HomePage> {
                             ),
                             _QuickActionCard(
                               title: 'Tausch',
-                              subtitle: data.pendingCount == 0
-                                  ? 'Keine offenen Bestätigungen'
-                                  : '${data.pendingCount} offen',
+                              subtitle: exchangesEnabled
+                                  ? data.pendingCount == 0
+                                        ? 'Keine offenen Bestätigungen'
+                                        : '${data.pendingCount} offen'
+                                  : 'Vorübergehend deaktiviert',
                               icon: Icons.swap_horiz,
                               color: const Color(0xFF6F4D57),
-                              onTap: () => widget.onNavigateToTab(2),
-                              accent: data.pendingCount > 0,
+                              onTap: () {
+                                if (!exchangesEnabled) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Das Tauschtool wird später freigeschaltet.',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                widget.onNavigateToTab(2);
+                              },
+                              accent: exchangesEnabled && data.pendingCount > 0,
+                              enabled: exchangesEnabled,
                             ),
                             _QuickActionCard(
                               title: 'Kurzübersicht',
@@ -503,6 +588,20 @@ class _HomePageState extends State<HomePage> {
                               onTap: () => widget.onNavigateToTab(4),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 12),
+                        _ActionListCard(
+                          title: 'Vorschlag oder Fehler melden',
+                          subtitle:
+                              'Ideen, Probleme und Verbesserungen direkt senden',
+                          icon: Icons.lightbulb_outline,
+                          onTap: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => const FeedbackPage(),
+                              ),
+                            );
+                          },
                         ),
                         if (isPgf) ...[
                           const SizedBox(height: 20),
@@ -598,6 +697,60 @@ class _HomePageState extends State<HomePage> {
     return '$date • $slotCode • $time';
   }
 
+  String _pointLabel(Map<String, dynamic>? point) {
+    if (point == null) return 'Keine Angabe';
+    final top = (point['top'] ?? '').toString().trim();
+    final title = (point['title'] ?? '').toString().trim();
+    if (top.isNotEmpty && title.isNotEmpty) return '$top • $title';
+    return top.isNotEmpty ? top : (title.isNotEmpty ? title : 'Keine Angabe');
+  }
+
+  String _formatDateTime(String? value, {bool timeOnly = false}) {
+    if (value == null || value.isEmpty) return '—';
+    final parsed = DateTime.tryParse(value);
+    if (parsed == null) return value;
+    final local = parsed.toLocal();
+    final date =
+        '${local.day.toString().padLeft(2, '0')}.${local.month.toString().padLeft(2, '0')}.${local.year}';
+    final time =
+        '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+    return timeOnly ? time : '$date · $time Uhr';
+  }
+
+  String _formatRollCallRange(Map<String, dynamic> point) {
+    final start = _formatDateTime(point['start_at']?.toString());
+    final location = (point['location'] ?? '').toString().trim();
+    if (location.isEmpty) return start;
+    return '$start · $location';
+  }
+
+  String _formatPgfDutyHeadline(Map<String, dynamic>? duty) {
+    if (duty == null) return 'Kein kommender PGF-Dienst';
+    final slotCode = (duty['slot_code'] ?? '').toString();
+    final weekday = (duty['weekday'] ?? '').toString();
+    final date = (duty['date'] ?? '').toString();
+    return [
+      slotCode,
+      weekday,
+      date,
+    ].where((part) => part.isNotEmpty).join(' • ');
+  }
+
+  String _formatPgfDutyDetail(Map<String, dynamic>? duty) {
+    if (duty == null) {
+      return 'Sobald ein Dienst geplant ist, erscheint er hier.';
+    }
+    final start = _hhmm(duty['start_time']);
+    final end = _hhmmNullable(duty['end_time']);
+    final assignmentType = (duty['assignment_type'] ?? '').toString();
+    final time = (end == null || end.isEmpty)
+        ? '$start Uhr'
+        : '$start–$end Uhr';
+    if (assignmentType == 'ruf') return '$time · Ruf';
+    if (assignmentType == 'active') return '$time · Aktiv';
+    return time;
+  }
+
   String _hhmm(dynamic value) {
     final text = (value ?? '').toString();
     if (text.length >= 5) return text.substring(0, 5);
@@ -620,6 +773,7 @@ class _HomeData {
     required this.unreadCount,
     required this.latestDocument,
     required this.latestSummaryDocument,
+    required this.liveInfo,
   });
 
   final Map<String, dynamic>? nextSlot;
@@ -627,6 +781,85 @@ class _HomeData {
   final int unreadCount;
   final Map<String, dynamic>? latestDocument;
   final Map<String, dynamic>? latestSummaryDocument;
+  final Map<String, dynamic>? liveInfo;
+}
+
+class _SessionBanner extends StatelessWidget {
+  const _SessionBanner({
+    required this.currentTop,
+    required this.nextTop,
+    required this.nextTopStart,
+  });
+
+  final String currentTop;
+  final String nextTop;
+  final String nextTopStart;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFFB51C2D), Color(0xFF7E1020)],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: const [
+              Icon(Icons.sensors, color: Colors.white),
+              SizedBox(width: 8),
+              Text(
+                'Sitzung laeuft',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            currentTop,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w800,
+              fontSize: 18,
+              height: 1.2,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Als Naechstes: $nextTop',
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            nextTopStart.isEmpty || nextTopStart == '—'
+                ? 'Naechster Start noch offen'
+                : 'Voraussichtlicher Start: $nextTopStart Uhr',
+            style: const TextStyle(color: Colors.white70),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _SpdLogoBadge extends StatelessWidget {
@@ -815,6 +1048,7 @@ class _QuickActionCard extends StatelessWidget {
     required this.color,
     required this.onTap,
     this.accent = false,
+    this.enabled = true,
   });
 
   final String title;
@@ -823,6 +1057,7 @@ class _QuickActionCard extends StatelessWidget {
   final Color color;
   final VoidCallback onTap;
   final bool accent;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -831,13 +1066,15 @@ class _QuickActionCard extends StatelessWidget {
       borderRadius: BorderRadius.circular(22),
       child: InkWell(
         borderRadius: BorderRadius.circular(22),
-        onTap: onTap,
+        onTap: enabled ? onTap : null,
         child: Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(22),
             border: Border.all(
-              color: accent
+              color: !enabled
+                  ? const Color(0xFFE5E7EB)
+                  : accent
                   ? color.withValues(alpha: 0.28)
                   : const Color(0xFFE8E1E3),
             ),
@@ -846,7 +1083,9 @@ class _QuickActionCard extends StatelessWidget {
               end: Alignment.bottomRight,
               colors: [
                 Colors.white,
-                accent
+                !enabled
+                    ? const Color(0xFFF8F8F8)
+                    : accent
                     ? color.withValues(alpha: 0.08)
                     : const Color(0xFFFDFDFD),
               ],
@@ -860,17 +1099,23 @@ class _QuickActionCard extends StatelessWidget {
                 width: 40,
                 height: 40,
                 decoration: BoxDecoration(
-                  color: color.withValues(alpha: 0.12),
+                  color: enabled
+                      ? color.withValues(alpha: 0.12)
+                      : Colors.grey.shade200,
                   borderRadius: BorderRadius.circular(14),
                 ),
-                child: Icon(icon, color: color),
+                child: Icon(
+                  icon,
+                  color: enabled ? color : Colors.grey.shade400,
+                ),
               ),
               const SizedBox(height: 12),
               Text(
                 title,
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w800,
                   fontSize: 15,
+                  color: enabled ? Colors.black : Colors.grey.shade500,
                 ),
               ),
               const SizedBox(height: 4),
@@ -887,6 +1132,78 @@ class _QuickActionCard extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _InfoPanelCard extends StatelessWidget {
+  const _InfoPanelCard({
+    required this.title,
+    required this.headline,
+    required this.detail,
+    required this.color,
+    required this.icon,
+  });
+
+  final String title;
+  final String headline;
+  final String detail;
+  final Color color;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE8E1E3)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: color),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: Colors.grey.shade700,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  headline,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                    height: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  detail,
+                  style: TextStyle(color: Colors.grey.shade700, height: 1.3),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

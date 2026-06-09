@@ -1,7 +1,7 @@
 # iOS TestFlight Release Checklist
 
 ## 1) Vorbedingungen
-- Oracle-Backend ist erreichbar (`https://api.130.61.45.35.sslip.io/docs`).
+- Produktiv-Backend ist erreichbar (`https://api.spdfraktion-intern.de/docs`).
 - Bundle-ID ist korrekt: `de.spdfraktion.intern`.
 - iOS-Firebase-Config passt zur Bundle-ID (`GoogleService-Info.plist`).
 - Apple Signing ist korrekt:
@@ -26,13 +26,19 @@ cd ios && pod install && cd ..
 ## 3) Release-IPA bauen
 Wichtig: `--build-number` bei jedem Upload erhöhen (z. B. `5`, `6`, `7`).
 
+Schnellweg:
+```bash
+/Users/johannesbt/spd-app/spd_mobile/scripts/build-ios-release.sh <N>
+```
+
+Oder manuell:
 ```bash
 cd /Users/johannesbt/spd-app/spd_mobile
 flutter build ipa \
   --release \
   --export-method app-store \
   --build-number <N> \
-  --dart-define=API_BASE_URL=https://api.130.61.45.35.sslip.io
+  --dart-define=API_BASE_URL=https://api.spdfraktion-intern.de
 ```
 
 Ergebnis:
@@ -56,7 +62,7 @@ Ergebnis:
 - Nachricht erscheint in Mitteilungen
 - App-Icon Badge zählt hoch/runter
 - Datei öffnen / Download funktioniert
-- Tausch-Funktionen funktionieren
+- Tauschtool ist bewusst deaktiviert
 
 ## 7) Häufige Fehler
 - `Invalid Signature (90035)`:
@@ -67,4 +73,3 @@ Ergebnis:
 - Push geht nicht:
   - falsches `GoogleService-Info.plist`
   - APNs/Push Capability fehlt
-

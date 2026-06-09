@@ -9,7 +9,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:123456789012:android:exampleappid",
         "android_client_info": {
-          "package_name": "com.example.spd_mobile"
+          "package_name": "de.spdfraktion.intern"
         }
       },
       "api_key": [

@@ -1,0 +1,4 @@
+storeFile=/ABSOLUTER/PFAD/ZU/release-keystore.jks
+storePassword=REPLACE_ME
+keyAlias=REPLACE_ME
+keyPassword=REPLACE_ME

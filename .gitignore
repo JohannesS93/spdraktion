@@ -34,6 +34,9 @@ spd_mobile/backend/spd-fraktion-intern-firebase-adminsdk-*.json
 spd_mobile/android/app/google-services.json
 spd_mobile/ios/GoogleService-Info.plist
 spd_mobile/ios/Runner/GoogleService-Info.plist
+spd_mobile/android/key.properties
+*.jks
+*.keystore
 
 # Local backups / exports
 *.zip

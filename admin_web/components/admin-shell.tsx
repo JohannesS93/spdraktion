@@ -11,6 +11,8 @@ import {
   ArrowLeftRight,
   Bell,
   FileText,
+  Lightbulb,
+  Info,
   LogOut,
   MessageSquare,
   Pencil,
@@ -45,6 +47,8 @@ type NavItem = {
   href: string;
   label: string;
   icon: ComponentType<{ className?: string }>;
+  disabled?: boolean;
+  disabledHint?: string;
 };
 
 const SHARED_ADMIN_PGF_NAV: NavItem[] = [
@@ -54,10 +58,13 @@ const SHARED_ADMIN_PGF_NAV: NavItem[] = [
   { href: "/admin/handbook", label: "Handbuch", icon: BookOpen },
   { href: "/admin/staff", label: "Mitarbeiter", icon: UserCog },
   { href: "/admin/documents", label: "Dateien", icon: FileText },
-  { href: "/admin/exchanges", label: "Tausch", icon: ArrowLeftRight },
+  { href: "/admin/feedback", label: "Rückmeldungen", icon: Lightbulb },
+  { href: "/admin/exchanges", label: "Tausch", icon: ArrowLeftRight, disabled: true, disabledHint: "Später verfügbar" },
   { href: "/admin/messages", label: "Nachrichten", icon: MessageSquare },
   { href: "/admin/stats", label: "Statistik", icon: BarChart3 },
 ];
+
+const JOHANNES_INFO_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
 
 const ADMIN_ONLY_NAV: NavItem[] = [
   { href: "/admin/users", label: "Nutzer", icon: Users },
@@ -65,7 +72,8 @@ const ADMIN_ONLY_NAV: NavItem[] = [
 
 const MDB_NAV: NavItem[] = [
   { href: "/admin/slots", label: "Präsenzdienste", icon: CalendarDays },
-  { href: "/admin/exchanges", label: "Tausch", icon: ArrowLeftRight },
+  { href: "/admin/feedback", label: "Rückmeldungen", icon: Lightbulb },
+  { href: "/admin/exchanges", label: "Tausch", icon: ArrowLeftRight, disabled: true, disabledHint: "Später verfügbar" },
   { href: "/admin/staff", label: "Mitarbeiter", icon: UserCog },
   { href: "/admin/handbook", label: "Handbuch", icon: BookOpen },
 ];
@@ -74,6 +82,14 @@ function getNav(role: string): NavItem[] {
   if (role === "admin") return [...SHARED_ADMIN_PGF_NAV, ...ADMIN_ONLY_NAV];
   if (role === "pgf") return SHARED_ADMIN_PGF_NAV;
   return MDB_NAV;
+}
+
+function getNavForSession(session: SessionUser): NavItem[] {
+  const baseNav = getNav(session.role);
+  if (session.email?.toLowerCase() === JOHANNES_INFO_EMAIL) {
+    return [...baseNav, { href: "/admin/informationen", label: "Informationen", icon: Info }];
+  }
+  return baseNav;
 }
 
 export function AdminShell({
@@ -85,7 +101,7 @@ export function AdminShell({
 }: Props) {
   const pathname = usePathname();
   const router = useRouter();
-  const nav = getNav(session.role);
+  const nav = getNavForSession(session);
   const canSendPush = session.role === "admin" || session.role === "pgf";
   const [pushSending, setPushSending] = useState(false);
   const [pushStatus, setPushStatus] = useState<string | null>(null);
@@ -161,18 +177,31 @@ export function AdminShell({
                 {nav.map((item) => {
                   const Icon = item.icon;
                   const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                  const classes = [
+                    "flex items-center gap-3 border-l-2 px-3 py-2.5 text-sm transition-colors",
+                    item.disabled
+                      ? "cursor-not-allowed border-l-transparent text-slate-400"
+                      : active
+                        ? "border-l-[#E3000F] bg-slate-50 text-slate-950"
+                        : "border-l-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-900",
+                  ].join(" ");
+
+                  if (item.disabled) {
+                    return (
+                      <div key={item.href} className={classes} title={item.disabledHint}>
+                        <Icon className="h-4 w-4" />
+                        <span>{item.label}</span>
+                        {item.disabledHint ? (
+                          <span className="ml-auto text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                            {item.disabledHint}
+                          </span>
+                        ) : null}
+                      </div>
+                    );
+                  }
 
                   return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      className={[
-                        "flex items-center gap-3 border-l-2 px-3 py-2.5 text-sm transition-colors",
-                        active
-                          ? "border-l-[#E3000F] bg-slate-50 text-slate-950"
-                          : "border-l-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-900",
-                      ].join(" ")}
-                    >
+                    <Link key={item.href} href={item.href} className={classes}>
                       <Icon className="h-4 w-4" />
                       <span>{item.label}</span>
                     </Link>

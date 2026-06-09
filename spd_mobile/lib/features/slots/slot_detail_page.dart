@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../core/api_client.dart';
 import '../../core/config.dart';
+import '../../core/feature_flags.dart';
 import '../attendance/attendance_page.dart';
 import '../profile/me_store.dart';
-import '../../core/logger.dart';
 
 class SlotDetailPage extends StatefulWidget {
   const SlotDetailPage({
@@ -56,8 +56,10 @@ class _SlotDetailPageState extends State<SlotDetailPage> {
     final participantsRaw =
         await api.getJson('/slots/${widget.slotId}/participants')
             as List<dynamic>;
-    final exchangesRaw =
-        await api.getJson('/slots/${widget.slotId}/exchanges') as List<dynamic>;
+    final exchangesRaw = exchangesEnabled
+        ? await api.getJson('/slots/${widget.slotId}/exchanges')
+              as List<dynamic>
+        : <dynamic>[];
     final attendanceAccessRaw =
         await api.getJson('/slots/${widget.slotId}/attendance-access')
             as Map<String, dynamic>;
@@ -178,7 +180,7 @@ class _SlotDetailPageState extends State<SlotDetailPage> {
                 Text(widget.subtitle),
                 const SizedBox(height: 12),
 
-                if (isMeParticipant)
+                if (isMeParticipant && exchangesEnabled)
                   FilledButton.icon(
                     onPressed: iAlreadyOfferedOpen ? null : _offerExchange,
                     icon: const Icon(Icons.add),
@@ -197,6 +199,19 @@ class _SlotDetailPageState extends State<SlotDetailPage> {
                       ),
                     ),
                   ),
+
+                if (!exchangesEnabled) ...[
+                  const SizedBox(height: 12),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Text(
+                        'Das Tauschtool bleibt vorerst deaktiviert und wird später freigeschaltet.',
+                        style: TextStyle(color: Colors.grey.shade700),
+                      ),
+                    ),
+                  ),
+                ],
 
                 if (data.canManageAttendance) ...[
                   const SizedBox(height: 12),
@@ -239,7 +254,14 @@ class _SlotDetailPageState extends State<SlotDetailPage> {
                 const _SectionTitle('Tauschbörse'),
                 const SizedBox(height: 8),
 
-                if (data.exchanges.isEmpty)
+                if (!exchangesEnabled)
+                  const Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(14),
+                      child: Text('Die Tauschbörse ist aktuell deaktiviert.'),
+                    ),
+                  )
+                else if (data.exchanges.isEmpty)
                   const Card(
                     child: Padding(
                       padding: EdgeInsets.all(14),
@@ -381,8 +403,8 @@ class _StatusChip extends StatelessWidget {
 
     return Chip(
       label: Text(label),
-      backgroundColor: color.withOpacity(0.15),
-      side: BorderSide(color: color.withOpacity(0.35)),
+      backgroundColor: color.withValues(alpha: 0.15),
+      side: BorderSide(color: color.withValues(alpha: 0.35)),
     );
   }
 }

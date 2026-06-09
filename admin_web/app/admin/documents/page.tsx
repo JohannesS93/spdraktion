@@ -1,9 +1,9 @@
 "use client";
 
-import React, { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import React, { ChangeEvent, FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
-import { FileText, FileUp, RefreshCw, Search, Trash2 } from "lucide-react";
+import { FileText, FileUp, RefreshCw, Trash2 } from "lucide-react";
 
 import { AdminShell } from "@/components/admin-shell";
 import { Button } from "@/components/ui/button";
@@ -24,16 +24,6 @@ type SessionUser = {
   assigned_mdb_user_id?: string | null;
 };
 
-type RecipientUser = {
-  id: string;
-  email: string;
-  first_name?: string | null;
-  last_name?: string | null;
-  role?: string | null;
-  assigned_mdb_name?: string | null;
-  is_active?: boolean;
-};
-
 type SentDocument = {
   id: string;
   title: string;
@@ -51,21 +41,24 @@ const CATEGORY_OPTIONS = [
   { value: "reden", label: "Reden" },
 ];
 
+const RECIPIENT_SCOPE_OPTIONS = [
+  { value: "all", label: "Alle" },
+  { value: "mdb", label: "MdBs" },
+  { value: "pgf", label: "PGFs" },
+];
+
 export default function DocumentsAdminPage() {
   const router = useRouter();
 
   const [session, setSessionState] = useState<SessionUser | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [loadingUsers, setLoadingUsers] = useState(false);
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [recipientQuery, setRecipientQuery] = useState("");
-  const [users, setUsers] = useState<RecipientUser[]>([]);
   const [documents, setDocuments] = useState<SentDocument[]>([]);
-  const [selectedRecipientIds, setSelectedRecipientIds] = useState<string[]>([]);
+  const [recipientScope, setRecipientScope] = useState("all");
   const [title, setTitle] = useState("");
   const [category, setCategory] = useState("information");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -89,7 +82,7 @@ export default function DocumentsAdminPage() {
     return () => unsubscribe();
   }, [router]);
 
-  async function getAuthHeaders() {
+  const getAuthHeaders = useCallback(async () => {
     const firebaseUser = auth.currentUser;
 
     if (!firebaseUser) {
@@ -103,31 +96,9 @@ export default function DocumentsAdminPage() {
     return {
       Authorization: `Bearer ${token}`,
     };
-  }
+  }, [router]);
 
-  async function loadUsers() {
-    setLoadingUsers(true);
-    setError("");
-
-    try {
-      const headers = await getAuthHeaders();
-      const res = await fetch(`${API_BASE}/admin/users`, { headers });
-
-      if (!res.ok) {
-        throw new Error("Empfänger konnten nicht geladen werden");
-      }
-
-      const data = (await res.json()) as RecipientUser[];
-      const activeUsers = data.filter((user) => user.is_active !== false);
-      setUsers(activeUsers);
-    } catch {
-      setError("Fehler beim Laden der Empfänger");
-    } finally {
-      setLoadingUsers(false);
-    }
-  }
-
-  async function loadDocuments() {
+  const loadDocuments = useCallback(async () => {
     setLoadingDocuments(true);
 
     try {
@@ -145,45 +116,14 @@ export default function DocumentsAdminPage() {
     } finally {
       setLoadingDocuments(false);
     }
-  }
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     if (!authReady || !session) return;
-    loadUsers();
     loadDocuments();
-  }, [authReady, session]);
-
-  const filteredUsers = useMemo(() => {
-    const query = recipientQuery.trim().toLowerCase();
-
-    if (!query) return users;
-
-    return users.filter((user) => {
-      const haystack = [
-        user.first_name,
-        user.last_name,
-        user.email,
-        user.role,
-        user.assigned_mdb_name,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-
-      return haystack.includes(query);
-    });
-  }, [users, recipientQuery]);
-
-  const filteredUserIds = useMemo(
-    () => filteredUsers.map((user) => user.id),
-    [filteredUsers]
-  );
+  }, [authReady, loadDocuments, session]);
 
   const canUpload = session?.role === "admin" || session?.role === "pgf";
-
-  const allFilteredSelected =
-    filteredUserIds.length > 0 &&
-    filteredUserIds.every((id) => selectedRecipientIds.includes(id));
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
@@ -193,24 +133,6 @@ export default function DocumentsAdminPage() {
       const titleWithoutExtension = file.name.replace(/\.[^.]+$/, "");
       setTitle(titleWithoutExtension);
     }
-  }
-
-  function toggleRecipient(id: string) {
-    setSelectedRecipientIds((current) =>
-      current.includes(id)
-        ? current.filter((item) => item !== id)
-        : [...current, id]
-    );
-  }
-
-  function toggleAllFiltered() {
-    setSelectedRecipientIds((current) => {
-      if (allFilteredSelected) {
-        return current.filter((id) => !filteredUserIds.includes(id));
-      }
-
-      return Array.from(new Set([...current, ...filteredUserIds]));
-    });
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
@@ -233,8 +155,8 @@ export default function DocumentsAdminPage() {
       return;
     }
 
-    if (selectedRecipientIds.length === 0) {
-      setError("Bitte mindestens einen Empfänger auswählen.");
+    if (!recipientScope) {
+      setError("Bitte einen Empfängerkreis auswählen.");
       return;
     }
 
@@ -245,7 +167,7 @@ export default function DocumentsAdminPage() {
       const formData = new FormData();
       formData.append("title", title.trim());
       formData.append("category", category);
-      formData.append("recipient_user_ids", JSON.stringify(selectedRecipientIds));
+      formData.append("recipient_scope", recipientScope);
       formData.append("file", selectedFile);
 
       const res = await fetch(`${API_BASE}/documents/upload`, {
@@ -263,8 +185,8 @@ export default function DocumentsAdminPage() {
       setSuccess("Datei wurde erfolgreich hochgeladen.");
       setTitle("");
       setCategory("information");
+      setRecipientScope("all");
       setSelectedFile(null);
-      setSelectedRecipientIds([]);
       await loadDocuments();
 
       const fileInput = document.getElementById("document-file-input") as HTMLInputElement | null;
@@ -334,13 +256,9 @@ export default function DocumentsAdminPage() {
     <AdminShell
       session={session}
       title="Dateien"
-      subtitle="Dokumente hochladen und an ausgewählte Empfänger verteilen"
+      subtitle="Dokumente hochladen und an feste Empfängerkreise verteilen"
       actions={
         <>
-          <Button className="admin-btn" variant="outline" onClick={loadUsers}>
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Empfänger aktualisieren
-          </Button>
           <Button className="admin-btn" variant="outline" onClick={loadDocuments}>
             <RefreshCw className="mr-2 h-4 w-4" />
             Dateien aktualisieren
@@ -405,76 +323,23 @@ export default function DocumentsAdminPage() {
               ) : null}
             </div>
 
-            <div className="space-y-3">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <Label>Empfänger</Label>
-                  <p className="mt-1 text-sm text-slate-500">
-                    {selectedRecipientIds.length} von {users.length} ausgewählt
-                  </p>
-                </div>
-
-                <div className="flex flex-col gap-2 md:w-[360px]">
-                  <div className="relative">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                    <Input
-                      className="admin-input pl-9"
-                      value={recipientQuery}
-                      onChange={(event) => setRecipientQuery(event.target.value)}
-                      placeholder="Empfänger suchen"
-                      disabled={!canUpload}
-                    />
-                  </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="admin-btn"
-                    onClick={toggleAllFiltered}
-                    disabled={!canUpload || filteredUsers.length === 0}
-                  >
-                    {allFilteredSelected ? "Gefilterte abwählen" : "Gefilterte auswählen"}
-                  </Button>
-                </div>
-              </div>
-
-              <div className="max-h-[420px] overflow-y-auto rounded border border-slate-200 bg-white">
-                {loadingUsers ? (
-                  <div className="p-4 text-sm text-slate-500">Empfänger werden geladen…</div>
-                ) : filteredUsers.length === 0 ? (
-                  <div className="p-4 text-sm text-slate-500">Keine passenden Empfänger gefunden.</div>
-                ) : (
-                  <div className="divide-y divide-slate-200">
-                    {filteredUsers.map((user) => {
-                      const checked = selectedRecipientIds.includes(user.id);
-                      const displayName =
-                        `${user.first_name ?? ""} ${user.last_name ?? ""}`.trim() || user.email;
-
-                      return (
-                        <label
-                          key={user.id}
-                          className="flex cursor-pointer items-start gap-3 px-4 py-3 hover:bg-slate-50"
-                        >
-                          <input
-                            type="checkbox"
-                            className="mt-1 h-4 w-4 accent-[#E3000F]"
-                            checked={checked}
-                            onChange={() => toggleRecipient(user.id)}
-                            disabled={!canUpload}
-                          />
-                          <div className="min-w-0">
-                            <div className="font-medium text-slate-900">{displayName}</div>
-                            <div className="text-sm text-slate-500">
-                              {user.email}
-                              {user.role ? ` · ${user.role}` : ""}
-                              {user.assigned_mdb_name ? ` · zugeordnet zu ${user.assigned_mdb_name}` : ""}
-                            </div>
-                          </div>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+            <div>
+              <Label htmlFor="document-recipient-scope">Datei senden an</Label>
+              <Select value={recipientScope} onValueChange={setRecipientScope} disabled={!canUpload}>
+                <SelectTrigger id="document-recipient-scope" className="admin-select-trigger mt-1">
+                  <SelectValue placeholder="Empfängerkreis auswählen" />
+                </SelectTrigger>
+                <SelectContent>
+                  {RECIPIENT_SCOPE_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="mt-2 text-sm text-slate-500">
+                Verfügbare Verteiler: Alle, MdBs oder PGFs.
+              </p>
             </div>
 
             {error ? <div className="admin-error">{error}</div> : null}

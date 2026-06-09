@@ -1,4 +1,4 @@
-package com.example.spd_mobile
+package de.spdfraktion.intern
 
 import io.flutter.embedding.android.FlutterActivity
 

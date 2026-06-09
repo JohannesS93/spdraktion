@@ -10,6 +10,7 @@ import {
   BarChart3,
   CalendarDays,
   FileText,
+  Lightbulb,
   MessageSquare,
   Pencil,
   Settings,
@@ -25,6 +26,8 @@ type NavItem = {
   title: string;
   description: string;
   icon: ComponentType<{ className?: string }>;
+  disabled?: boolean;
+  disabledHint?: string;
 };
 
 const SHARED_ITEMS: NavItem[] = [
@@ -59,10 +62,18 @@ const SHARED_ITEMS: NavItem[] = [
     icon: FileText,
   },
   {
+    href: "/admin/feedback",
+    title: "Rückmeldungen",
+    description: "Fehler, Hinweise und Verbesserungsvorschläge sammeln.",
+    icon: Lightbulb,
+  },
+  {
     href: "/admin/exchanges",
     title: "Tausch",
-    description: "Tauschanfragen prüfen und freigeben.",
+    description: "Der Tauschbereich bleibt vorerst deaktiviert.",
     icon: ArrowLeftRight,
+    disabled: true,
+    disabledHint: "Später verfügbar",
   },
   {
     href: "/admin/messages",
@@ -97,8 +108,10 @@ const STAFF_ITEMS: NavItem[] = [
   {
     href: "/admin/exchanges",
     title: "Tausch",
-    description: "Tauschanfragen einsehen und bearbeiten.",
+    description: "Der Tauschbereich bleibt vorerst deaktiviert.",
     icon: ArrowLeftRight,
+    disabled: true,
+    disabledHint: "Später verfügbar",
   },
   {
     href: "/admin/staff",
@@ -194,21 +207,44 @@ export default function BackendHomePage() {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         {navItems.map((item) => {
           const Icon = item.icon;
-          return (
-            <Link key={item.href} href={item.href}>
-              <div className="group flex h-full flex-col gap-3 rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition-all duration-150 hover:-translate-y-0.5 hover:border-[#E3000F]/30 hover:shadow-md">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#E3000F]/8 transition-colors group-hover:bg-[#E3000F]/15">
-                  <Icon className="h-5 w-5 text-[#E3000F]" />
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-slate-900">
-                    {item.title}
-                  </div>
-                  <div className="mt-1 text-xs leading-relaxed text-slate-500">
-                    {item.description}
-                  </div>
-                </div>
+          const content = (
+            <div
+              className={[
+                "group flex h-full flex-col gap-3 rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition-all duration-150",
+                item.disabled
+                  ? "cursor-not-allowed opacity-55"
+                  : "hover:-translate-y-0.5 hover:border-[#E3000F]/30 hover:shadow-md",
+              ].join(" ")}
+            >
+              <div
+                className={[
+                  "flex h-10 w-10 items-center justify-center rounded-lg transition-colors",
+                  item.disabled ? "bg-slate-200" : "bg-[#E3000F]/8 group-hover:bg-[#E3000F]/15",
+                ].join(" ")}
+              >
+                <Icon className={["h-5 w-5", item.disabled ? "text-slate-400" : "text-[#E3000F]"].join(" ")} />
               </div>
+              <div>
+                <div className="text-sm font-semibold text-slate-900">
+                  {item.title}
+                </div>
+                <div className="mt-1 text-xs leading-relaxed text-slate-500">
+                  {item.description}
+                </div>
+                {item.disabledHint ? (
+                  <div className="mt-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-400">
+                    {item.disabledHint}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          );
+
+          return item.disabled ? (
+            <div key={item.href}>{content}</div>
+          ) : (
+            <Link key={item.href} href={item.href}>
+              {content}
             </Link>
           );
         })}
