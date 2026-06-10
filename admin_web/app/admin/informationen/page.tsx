@@ -92,6 +92,14 @@ type ParliamentInfo = {
   } | null;
   current_top?: ParliamentPoint | null;
   next_top?: ParliamentPoint | null;
+  session_days?: Array<{
+    date?: string | null;
+    date_text?: string | null;
+    session_number?: string | null;
+    name?: string | null;
+    active?: boolean;
+    selected?: boolean;
+  }>;
   next_roll_call?: RollCall | null;
   next_pgf_duty?: ServiceDuty | null;
   next_speech?: { title?: string | null; start_at?: string | null } | null;
@@ -152,13 +160,19 @@ export default function InformationenPage() {
   const [info, setInfo] = useState<ParliamentInfo | null>(null);
   const [factionSpeeches, setFactionSpeeches] = useState<FactionSpeech[]>([]);
   const [selectedTop, setSelectedTop] = useState<string | null>(null);
+  const [selectedSessionDate, setSelectedSessionDate] = useState<string | null>(null);
 
-  const loadInfo = useCallback(async () => {
+  const loadInfo = useCallback(async (sessionDate?: string | null) => {
     setRefreshing(true);
     setError(null);
     try {
       const token = await auth.currentUser?.getIdToken();
-      const res = await fetch(`${API_BASE}/me/live-info`, {
+      const query = new URLSearchParams();
+      if (sessionDate) {
+        query.set("at", `${sessionDate}T12:00:00+02:00`);
+      }
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      const res = await fetch(`${API_BASE}/me/live-info${suffix}`, {
         cache: "no-store",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
@@ -168,12 +182,13 @@ export default function InformationenPage() {
       }
       const [data, speechesRes] = await Promise.all([
         res.json() as Promise<ParliamentInfo>,
-        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers`, {
+        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers${suffix}`, {
           cache: "no-store",
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         }),
       ]);
       setInfo(data);
+      setSelectedSessionDate(data.current_session?.date ?? sessionDate ?? null);
       if (speechesRes.ok) {
         const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
         setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
@@ -207,10 +222,10 @@ export default function InformationenPage() {
   useEffect(() => {
     if (!session) return;
     const interval = window.setInterval(() => {
-      void loadInfo();
+      void loadInfo(selectedSessionDate);
     }, 60_000);
     return () => window.clearInterval(interval);
-  }, [loadInfo, session]);
+  }, [loadInfo, selectedSessionDate, session]);
 
   const runningBadge = useMemo(() => {
     if (!info) return null;
@@ -257,6 +272,28 @@ export default function InformationenPage() {
       }
     >
       <div className="space-y-6 p-6">
+        {(info?.session_days?.length ?? 0) > 0 ? (
+          <div className="flex flex-wrap gap-2 border border-slate-200 bg-white p-3">
+            {info?.session_days?.map((day) => {
+              const isSelected = day.date === selectedSessionDate;
+              return (
+                <button
+                  key={day.date ?? day.date_text}
+                  type="button"
+                  onClick={() => void loadInfo(day.date ?? null)}
+                  className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                    isSelected
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                  }`}
+                >
+                  {day.date_text || day.date || "Sitzungstag"}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-3">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">

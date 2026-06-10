@@ -2313,6 +2313,23 @@ def _build_parliament_live_payload(at: datetime | None = None) -> dict:
         }
         if current_session
         else None,
+        "session_days": [
+            {
+                "date": session.get("date").isoformat() if session.get("date") else None,
+                "date_text": session.get("date_text"),
+                "session_number": session.get("session_number"),
+                "name": session.get("name"),
+                "active": bool(session.get("active")),
+                "selected": bool(
+                    current_session
+                    and session.get("date")
+                    and current_session.get("date")
+                    and session.get("date") == current_session.get("date")
+                ),
+            }
+            for session in sessions
+            if session.get("date")
+        ],
         "current_top": _serialize_parliament_point(current_point),
         "next_top": _serialize_parliament_point(next_point),
         "next_roll_call": _serialize_roll_call(next_roll_call),
