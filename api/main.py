@@ -3865,6 +3865,23 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
                     "notes": entry.get("notes") or [],
                 }
             )
+        for speaker_name in entry.get("unmatched_speakers") or []:
+            speeches.append(
+                {
+                    "user_id": None,
+                    "speaker_name": speaker_name,
+                    "source_speaker_name": speaker_name,
+                    "role": None,
+                    "email": None,
+                    "top_labels": entry.get("top_labels") or [],
+                    "top": (entry.get("top_labels") or [None])[0],
+                    "title": entry.get("title"),
+                    "planned_start_at": entry.get("start_at"),
+                    "effective_start_at": effective_start_at,
+                    "live_matched": False,
+                    "notes": entry.get("notes") or [],
+                }
+            )
 
     speeches.sort(key=lambda item: item.get("effective_start_at") or item.get("planned_start_at") or "")
     return speeches

@@ -151,6 +151,22 @@ function normalizeTopLabels(value?: string | null) {
     .filter(Boolean);
 }
 
+function startOfWeek(date: Date) {
+  const copy = new Date(date);
+  copy.setHours(0, 0, 0, 0);
+  const day = copy.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  copy.setDate(copy.getDate() + diff);
+  return copy;
+}
+
+function endOfWeek(date: Date) {
+  const copy = startOfWeek(date);
+  copy.setDate(copy.getDate() + 6);
+  copy.setHours(23, 59, 59, 999);
+  return copy;
+}
+
 export default function InformationenPage() {
   const router = useRouter();
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -250,6 +266,20 @@ export default function InformationenPage() {
     return grouped;
   }, [factionSpeeches]);
 
+  const visibleSessionDays = useMemo(() => {
+    const days = info?.session_days ?? [];
+    if (!days.length) return [];
+    const baseDate = new Date(selectedSessionDate ?? info?.current_session?.date ?? info?.effective_at ?? Date.now());
+    if (Number.isNaN(baseDate.getTime())) return days;
+    const weekStart = startOfWeek(baseDate);
+    const weekEnd = endOfWeek(baseDate);
+    return days.filter((day) => {
+      if (!day.date) return false;
+      const current = new Date(`${day.date}T12:00:00+02:00`);
+      return current >= weekStart && current <= weekEnd;
+    });
+  }, [info, selectedSessionDate]);
+
   if (loading || !session) {
     return <div className="p-8 text-sm text-slate-500">Lade Informationen…</div>;
   }
@@ -272,9 +302,9 @@ export default function InformationenPage() {
       }
     >
       <div className="space-y-6 p-6">
-        {(info?.session_days?.length ?? 0) > 0 ? (
+        {visibleSessionDays.length > 0 ? (
           <div className="flex flex-wrap gap-2 border border-slate-200 bg-white p-3">
-            {info?.session_days?.map((day) => {
+            {visibleSessionDays.map((day) => {
               const isSelected = day.date === selectedSessionDate;
               return (
                 <button
@@ -378,11 +408,19 @@ export default function InformationenPage() {
                   new Map(
                     topKeys
                       .flatMap((key) => speakersByTop.get(key) ?? [])
-                      .map((speaker, speakerIndex) => [
-                        `${speaker.user_id ?? speaker.speaker_name ?? "speaker"}-${speaker.top ?? ""}-${speakerIndex}`,
-                        speaker,
-                      ]),
+                      .map((speaker) => {
+                        const displayName = (speaker.source_speaker_name || speaker.speaker_name || "Unbekannt").trim();
+                        return [
+                          `${displayName.toUpperCase()}|${speaker.top ?? ""}`,
+                          {
+                            ...speaker,
+                            speaker_name: displayName,
+                          },
+                        ];
+                      }),
                   ).values(),
+                ).sort((a, b) =>
+                  (a.speaker_name || "").localeCompare(b.speaker_name || "", "de", { sensitivity: "base" }),
                 );
                 const topKey = topKeys.join("|");
                 const isSelected = selectedTop === topKey;
@@ -423,26 +461,15 @@ export default function InformationenPage() {
                             Redner zu diesem TOP
                           </div>
                           {speakers.length ? (
-                            <div className="mt-3 grid gap-3 md:grid-cols-2">
-                              {speakers.map((speaker, speakerIndex) => {
-                                const startAt = speaker.effective_start_at ?? speaker.planned_start_at;
-                                return (
-                                  <div
-                                    key={`${speaker.user_id ?? speaker.speaker_name ?? "speaker"}-${speakerIndex}`}
-                                    className="border border-slate-200 bg-slate-50 px-3 py-3"
-                                  >
-                                    <div className="font-medium text-slate-900">
-                                      {speaker.speaker_name || speaker.source_speaker_name || "Unbekannt"}
-                                    </div>
-                                    {speaker.title ? (
-                                      <div className="mt-1 text-sm text-slate-600">{speaker.title}</div>
-                                    ) : null}
-                                    <div className="mt-2 text-sm text-slate-500">
-                                      Geplante Zeit: {formatTime(startAt)}
-                                    </div>
-                                  </div>
-                                );
-                              })}
+                            <div className="mt-3 space-y-2">
+                              {speakers.map((speaker, speakerIndex) => (
+                                <div
+                                  key={`${speaker.speaker_name ?? "speaker"}-${speakerIndex}`}
+                                  className="border border-slate-200 bg-slate-50 px-3 py-3 font-medium text-slate-900"
+                                >
+                                  {speaker.speaker_name || "Unbekannt"}
+                                </div>
+                              ))}
                             </div>
                           ) : (
                             <div className="mt-3 text-sm text-slate-500">
