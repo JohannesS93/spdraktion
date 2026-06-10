@@ -55,6 +55,25 @@ type ServiceDuty = {
   assignment_type?: string | null;
 };
 
+type FactionSpeech = {
+  user_id?: string | null;
+  speaker_name?: string | null;
+  source_speaker_name?: string | null;
+  role?: string | null;
+  email?: string | null;
+  top_labels?: string[] | null;
+  top?: string | null;
+  title?: string | null;
+  planned_start_at?: string | null;
+  effective_start_at?: string | null;
+  live_matched?: boolean | null;
+  notes?: string[] | null;
+};
+
+type FactionSpeechesResponse = {
+  items?: FactionSpeech[];
+};
+
 type ParliamentInfo = {
   mode: string;
   generated_at: string;
@@ -120,6 +139,8 @@ export default function InformationenPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<ParliamentInfo | null>(null);
+  const [factionSpeeches, setFactionSpeeches] = useState<FactionSpeech[]>([]);
+  const [selectedTop, setSelectedTop] = useState<string | null>(null);
 
   const loadInfo = useCallback(async () => {
     setRefreshing(true);
@@ -134,8 +155,20 @@ export default function InformationenPage() {
         const text = await res.text().catch(() => "");
         throw new Error(text || `HTTP ${res.status}`);
       }
-      const data = (await res.json()) as ParliamentInfo;
+      const [data, speechesRes] = await Promise.all([
+        res.json() as Promise<ParliamentInfo>,
+        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers`, {
+          cache: "no-store",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }),
+      ]);
       setInfo(data);
+      if (speechesRes.ok) {
+        const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
+        setFactionSpeeches(speechesData.items ?? []);
+      } else {
+        setFactionSpeeches([]);
+      }
     } catch (err) {
       setError(String(err));
     } finally {
@@ -175,6 +208,21 @@ export default function InformationenPage() {
     }
     return <Badge variant="outline" className="rounded-full">Keine laufende Sitzung</Badge>;
   }, [info]);
+
+  const speakersByTop = useMemo(() => {
+    const grouped = new Map<string, FactionSpeech[]>();
+    factionSpeeches.forEach((speech) => {
+      const labels = [...(speech.top_labels ?? []), speech.top ?? null]
+        .map((value) => (value ?? "").trim().toUpperCase())
+        .filter(Boolean);
+      labels.forEach((label) => {
+        const existing = grouped.get(label) ?? [];
+        existing.push(speech);
+        grouped.set(label, existing);
+      });
+    });
+    return grouped;
+  }, [factionSpeeches]);
 
   if (loading || !session) {
     return <div className="p-8 text-sm text-slate-500">Lade Informationen…</div>;
@@ -277,30 +325,76 @@ export default function InformationenPage() {
                   point.top === info?.current_top?.top && point.start_at === info?.current_top?.start_at;
                 const isNext =
                   point.top === info?.next_top?.top && point.start_at === info?.next_top?.start_at;
+                const topKey = (point.top ?? "").trim().toUpperCase();
+                const speakers = topKey ? speakersByTop.get(topKey) ?? [] : [];
+                const isSelected = selectedTop === topKey;
 
                 return (
-                  <div
+                  <button
                     key={`${point.top ?? "no-top"}-${point.start_at ?? index}`}
-                    className="flex flex-col gap-2 border border-slate-200 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between"
+                    type="button"
+                    onClick={() => setSelectedTop(isSelected ? null : topKey)}
+                    className="w-full border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
                   >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs uppercase tracking-[0.24em] text-slate-500">
-                          {point.top || "Ohne TOP"}
-                        </span>
-                        {isCurrent ? (
-                          <Badge className="rounded-full bg-slate-900 hover:bg-slate-900">Aktuell</Badge>
-                        ) : null}
-                        {isNext ? (
-                          <Badge variant="outline" className="rounded-full">Als Nächstes</Badge>
-                        ) : null}
+                    <div className="flex flex-col gap-3">
+                      <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs uppercase tracking-[0.24em] text-slate-500">
+                              {point.top || "Ohne TOP"}
+                            </span>
+                            {isCurrent ? (
+                              <Badge className="rounded-full bg-slate-900 hover:bg-slate-900">Aktuell</Badge>
+                            ) : null}
+                            {isNext ? (
+                              <Badge variant="outline" className="rounded-full">Als Nächstes</Badge>
+                            ) : null}
+                            <Badge variant="outline" className="rounded-full">
+                              {speakers.length} {speakers.length === 1 ? "Redner" : "Redner"}
+                            </Badge>
+                          </div>
+                          <div className="mt-1 font-medium text-slate-900">{point.title || "Ohne Titel"}</div>
+                        </div>
+                        <div className="shrink-0 text-sm text-slate-500">
+                          {formatTime(point.start_at)} – {formatTime(point.end_at)}
+                        </div>
                       </div>
-                      <div className="mt-1 font-medium text-slate-900">{point.title || "Ohne Titel"}</div>
+                      {isSelected ? (
+                        <div className="border-t border-slate-200 pt-3">
+                          <div className="text-xs uppercase tracking-[0.24em] text-slate-500">
+                            Redner zu diesem TOP
+                          </div>
+                          {speakers.length ? (
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              {speakers.map((speaker, speakerIndex) => {
+                                const startAt = speaker.effective_start_at ?? speaker.planned_start_at;
+                                return (
+                                  <div
+                                    key={`${speaker.user_id ?? speaker.speaker_name ?? "speaker"}-${speakerIndex}`}
+                                    className="border border-slate-200 bg-slate-50 px-3 py-3"
+                                  >
+                                    <div className="font-medium text-slate-900">
+                                      {speaker.speaker_name || speaker.source_speaker_name || "Unbekannt"}
+                                    </div>
+                                    {speaker.title ? (
+                                      <div className="mt-1 text-sm text-slate-600">{speaker.title}</div>
+                                    ) : null}
+                                    <div className="mt-2 text-sm text-slate-500">
+                                      Geplante Zeit: {formatTime(startAt)}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="mt-3 text-sm text-slate-500">
+                              Für diesen TOP sind aktuell keine Redner aus der Kurzübersicht erfasst.
+                            </div>
+                          )}
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="shrink-0 text-sm text-slate-500">
-                      {formatTime(point.start_at)} – {formatTime(point.end_at)}
-                    </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
