@@ -109,10 +109,8 @@ type ParliamentInfo = {
   agenda_points: ParliamentPoint[];
 };
 
-const ALLOWED_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
-
 function canAccess(session?: SessionUser | null) {
-  return session?.email?.toLowerCase() === ALLOWED_EMAIL;
+  return Boolean(session?.email);
 }
 
 function formatDateTime(value?: string | null) {
@@ -289,7 +287,7 @@ export default function InformationenPage() {
   return (
     <AdminShell
       title="Informationen"
-      subtitle="Spiegel der Bundestag-Live-Daten für den späteren Mobile-Infoscreen."
+      subtitle="Aktuelle Informationen aus Sitzung, Agenda und Rednerfolge."
       session={session}
       actions={
         <Button
@@ -329,12 +327,7 @@ export default function InformationenPage() {
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-3">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <CardTitle className="text-xl">Aktueller Sitzungsstatus</CardTitle>
-                <p className="mt-1 text-sm text-slate-500">
-                  Dieser Block zeigt genau die Live-Grundlage, aus der später der Mobile-Banner gebaut wird.
-                </p>
-              </div>
+              <CardTitle className="text-xl">Aktueller Sitzungsstatus</CardTitle>
               {runningBadge}
             </div>
           </CardHeader>
@@ -373,13 +366,11 @@ export default function InformationenPage() {
         <div className="grid gap-6 xl:grid-cols-3">
           <InfoCard
             title="Aktuell laufender TOP"
-            subtitle="Basis für den geplanten Live-Banner in der App."
             point={info?.current_top}
             emptyText="Zurzeit läuft laut Datenstand kein TOP."
           />
           <InfoCard
             title="Nächster TOP"
-            subtitle="Wird später im Banner als nächster Punkt mit Startzeit gezeigt."
             point={info?.next_top}
             emptyText="Zurzeit ist kein nächster TOP erkennbar."
           />
@@ -394,9 +385,6 @@ export default function InformationenPage() {
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-2">
             <CardTitle className="text-xl">Aktuelle Sitzungsagenda</CardTitle>
-            <p className="text-sm text-slate-500">
-              Hilfreich zur fachlichen Kontrolle, ob die Live-Zuordnung von aktuellem und nächstem TOP plausibel ist.
-            </p>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
@@ -421,9 +409,19 @@ export default function InformationenPage() {
                         ];
                       }),
                   ).values(),
-                ).sort((a, b) =>
-                  (a.speaker_name || "").localeCompare(b.speaker_name || "", "de", { sensitivity: "base" }),
-                );
+                ).sort((a, b) => {
+                  const aHasLive = Boolean(a.has_live_time && a.effective_start_at);
+                  const bHasLive = Boolean(b.has_live_time && b.effective_start_at);
+                  if (aHasLive && bHasLive) {
+                    return (a.effective_start_at || "").localeCompare(b.effective_start_at || "");
+                  }
+                  if (aHasLive !== bHasLive) {
+                    return aHasLive ? -1 : 1;
+                  }
+                  return (a.speaker_name || "").localeCompare(b.speaker_name || "", "de", {
+                    sensitivity: "base",
+                  });
+                });
                 const topKey = topKeys.join("|");
                 const isSelected = selectedTop === topKey;
 
@@ -528,12 +526,10 @@ function InfoMetric({
 
 function InfoCard({
   title,
-  subtitle,
   point,
   emptyText,
 }: {
   title: string;
-  subtitle: string;
   point?: ParliamentPoint | null;
   emptyText: string;
 }) {
@@ -541,7 +537,6 @@ function InfoCard({
     <Card className="rounded-none border-slate-200">
       <CardHeader className="pb-2">
         <CardTitle className="text-lg">{title}</CardTitle>
-        <p className="text-sm text-slate-500">{subtitle}</p>
       </CardHeader>
       <CardContent>
         {point ? (
