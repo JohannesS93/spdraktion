@@ -319,6 +319,37 @@ function assignmentLabel(value?: string | null) {
   return value === "ruf" ? "Ruf" : "Aktiv";
 }
 
+function reasonLabel(value?: string | null) {
+  switch (value) {
+    case "history_total":
+      return "Historie gesamt";
+    case "history_late":
+      return "Historie späte Slots";
+    case "history_friday_last":
+      return "Historie Freitag letzter Slot";
+    case "week_total":
+      return "Woche gesamt";
+    case "week_active":
+      return "Woche Aktiv";
+    case "week_ruf":
+      return "Woche Ruf";
+    case "week_late":
+      return "Woche späte Slots";
+    case "week_friday_last":
+      return "Woche Freitag letzter Slot";
+    case "role_balance":
+      return "Rollenausgleich";
+    case "wednesday_compensation":
+      return "Mittwochsausgleich";
+    case "manual_fixed":
+      return "Manuell fixiert";
+    case "full_attendance":
+      return "Vollanwesenheit";
+    default:
+      return value?.replaceAll("_", " ") ?? "—";
+  }
+}
+
 function retroactiveCleanupMessage(
   cleanup: RetroactiveCleanupSummary | undefined,
   fallback: string
