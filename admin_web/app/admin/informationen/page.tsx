@@ -72,6 +72,7 @@ type FactionSpeech = {
 
 type FactionSpeechesResponse = {
   items?: FactionSpeech[];
+  speeches?: FactionSpeech[];
 };
 
 type ParliamentInfo = {
@@ -132,6 +133,16 @@ function pointLabel(point?: ParliamentPoint | RollCall | null) {
   return top || title || "—";
 }
 
+function normalizeTopLabels(value?: string | null) {
+  const raw = (value ?? "").trim().toUpperCase();
+  if (!raw) return [];
+  const normalized = raw.replace(/\bTOP\s+/g, "").replace(/\bZP\s+/g, "ZP ");
+  return normalized
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 export default function InformationenPage() {
   const router = useRouter();
   const [session, setSession] = useState<SessionUser | null>(null);
@@ -165,7 +176,7 @@ export default function InformationenPage() {
       setInfo(data);
       if (speechesRes.ok) {
         const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
-        setFactionSpeeches(speechesData.items ?? []);
+        setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
       } else {
         setFactionSpeeches([]);
       }
@@ -212,9 +223,9 @@ export default function InformationenPage() {
   const speakersByTop = useMemo(() => {
     const grouped = new Map<string, FactionSpeech[]>();
     factionSpeeches.forEach((speech) => {
-      const labels = [...(speech.top_labels ?? []), speech.top ?? null]
-        .map((value) => (value ?? "").trim().toUpperCase())
-        .filter(Boolean);
+      const labels = [...(speech.top_labels ?? []), speech.top ?? null].flatMap((value) =>
+        normalizeTopLabels(value),
+      );
       labels.forEach((label) => {
         const existing = grouped.get(label) ?? [];
         existing.push(speech);
@@ -325,8 +336,18 @@ export default function InformationenPage() {
                   point.top === info?.current_top?.top && point.start_at === info?.current_top?.start_at;
                 const isNext =
                   point.top === info?.next_top?.top && point.start_at === info?.next_top?.start_at;
-                const topKey = (point.top ?? "").trim().toUpperCase();
-                const speakers = topKey ? speakersByTop.get(topKey) ?? [] : [];
+                const topKeys = normalizeTopLabels(point.top);
+                const speakers = Array.from(
+                  new Map(
+                    topKeys
+                      .flatMap((key) => speakersByTop.get(key) ?? [])
+                      .map((speaker, speakerIndex) => [
+                        `${speaker.user_id ?? speaker.speaker_name ?? "speaker"}-${speaker.top ?? ""}-${speakerIndex}`,
+                        speaker,
+                      ]),
+                  ).values(),
+                );
+                const topKey = topKeys.join("|");
                 const isSelected = selectedTop === topKey;
 
                 return (
