@@ -67,6 +67,8 @@ type FactionSpeech = {
   planned_start_at?: string | null;
   effective_start_at?: string | null;
   live_matched?: boolean | null;
+  has_live_time?: boolean | null;
+  live_state?: string | null;
   notes?: string[] | null;
 };
 
@@ -465,9 +467,16 @@ export default function InformationenPage() {
                               {speakers.map((speaker, speakerIndex) => (
                                 <div
                                   key={`${speaker.speaker_name ?? "speaker"}-${speakerIndex}`}
-                                  className="border border-slate-200 bg-slate-50 px-3 py-3 font-medium text-slate-900"
+                                  className="border border-slate-200 bg-slate-50 px-3 py-3"
                                 >
-                                  {speaker.speaker_name || "Unbekannt"}
+                                  <div className="font-medium text-slate-900">
+                                    {speaker.speaker_name || "Unbekannt"}
+                                  </div>
+                                  {speaker.has_live_time ? (
+                                    <div className="mt-1 text-sm text-slate-500">
+                                      Live-Zeit: {formatTime(speaker.effective_start_at)}
+                                    </div>
+                                  ) : null}
                                 </div>
                               ))}
                             </div>

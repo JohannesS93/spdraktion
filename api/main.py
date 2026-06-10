@@ -1922,15 +1922,21 @@ def _parse_bundestag_speaker() -> dict:
         for speaker_el in speakers_parent.findall("speaker"):
             speakers.append(
                 {
+                    "topic": _bundestag_xml_text(speaker_el, "topic") or None,
+                    "start_at": _parse_bundestag_timestamp(_bundestag_xml_text(speaker_el, "startTime")),
+                    "state": _bundestag_xml_text(speaker_el, "state") or None,
                     "name": _bundestag_xml_text(speaker_el, "name") or None,
                     "party": _bundestag_xml_text(speaker_el, "party") or None,
                     "function": _bundestag_xml_text(speaker_el, "function") or None,
+                    "fraktion": _bundestag_xml_text(speaker_el, "fraktion") or None,
+                    "mdb_id": _bundestag_xml_text(speaker_el, "mdbId") or None,
                 }
             )
 
     return {
         "live": _bundestag_xml_text(root, "live").lower() == "true",
         "topic_number": _bundestag_xml_text(root, "topicNumber") or None,
+        "topic": (_bundestag_xml_text(speakers_parent.find("speaker"), "topic") if speakers_parent is not None and speakers_parent.find("speaker") is not None else None) or None,
         "speakers": speakers,
     }
 
@@ -3839,16 +3845,50 @@ def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: 
     return None
 
 
+def _build_live_speaker_lookup(parliament_payload: dict | None) -> dict[tuple[str, str], dict]:
+    speaker_payload = _parse_bundestag_speaker()
+    if not speaker_payload.get("live"):
+        return {}
+
+    live_topic_number = (speaker_payload.get("topic_number") or "").strip().upper()
+    lookup: dict[tuple[str, str], dict] = {}
+    for speaker in speaker_payload.get("speakers") or []:
+        speaker_name = (speaker.get("name") or "").strip()
+        if not speaker_name:
+            continue
+
+        topic_number = live_topic_number
+        key = (_normalize_text_key(speaker_name), topic_number)
+        lookup[key] = speaker
+
+    return lookup
+
+
 def _build_faction_speech_entries(parliament_payload: dict | None = None) -> list[dict]:
     latest_payload = _build_latest_kurzuebersicht_payload()
     if not latest_payload:
         return []
 
+    live_speaker_lookup = _build_live_speaker_lookup(parliament_payload)
     speeches: list[dict] = []
     for entry in latest_payload["entries"]:
         live_point = _match_live_point_for_kurzuebersicht_entry(entry, parliament_payload)
         effective_start_at = (live_point or {}).get("start_at") or entry.get("start_at")
+        top_labels = entry.get("top_labels") or []
+        primary_top_label = (top_labels[0] if top_labels else None) or ""
+        normalized_top_candidates = {
+            label.strip().upper()
+            for label in top_labels
+            if (label or "").strip()
+        }
         for speaker in entry.get("matched_speakers") or []:
+            live_speaker = None
+            for top_label in normalized_top_candidates:
+                live_speaker = live_speaker_lookup.get(
+                    (_normalize_text_key(speaker["name"]), top_label)
+                )
+                if live_speaker:
+                    break
             speeches.append(
                 {
                     "user_id": speaker["user_id"],
@@ -3856,16 +3896,25 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
                     "source_speaker_name": speaker["name"],
                     "role": speaker.get("role"),
                     "email": speaker.get("email"),
-                    "top_labels": entry.get("top_labels") or [],
-                    "top": (entry.get("top_labels") or [None])[0],
+                    "top_labels": top_labels,
+                    "top": primary_top_label or None,
                     "title": entry.get("title"),
                     "planned_start_at": entry.get("start_at"),
-                    "effective_start_at": effective_start_at,
-                    "live_matched": live_point is not None,
+                    "effective_start_at": _iso_or_none(live_speaker.get("start_at")) if live_speaker and live_speaker.get("start_at") else effective_start_at,
+                    "live_matched": live_speaker is not None or live_point is not None,
+                    "has_live_time": live_speaker is not None and live_speaker.get("start_at") is not None,
+                    "live_state": live_speaker.get("state") if live_speaker else None,
                     "notes": entry.get("notes") or [],
                 }
             )
         for speaker_name in entry.get("unmatched_speakers") or []:
+            live_speaker = None
+            for top_label in normalized_top_candidates:
+                live_speaker = live_speaker_lookup.get(
+                    (_normalize_text_key(speaker_name), top_label)
+                )
+                if live_speaker:
+                    break
             speeches.append(
                 {
                     "user_id": None,
@@ -3873,12 +3922,14 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
                     "source_speaker_name": speaker_name,
                     "role": None,
                     "email": None,
-                    "top_labels": entry.get("top_labels") or [],
-                    "top": (entry.get("top_labels") or [None])[0],
+                    "top_labels": top_labels,
+                    "top": primary_top_label or None,
                     "title": entry.get("title"),
                     "planned_start_at": entry.get("start_at"),
-                    "effective_start_at": effective_start_at,
-                    "live_matched": False,
+                    "effective_start_at": _iso_or_none(live_speaker.get("start_at")) if live_speaker and live_speaker.get("start_at") else effective_start_at,
+                    "live_matched": live_speaker is not None or live_point is not None,
+                    "has_live_time": live_speaker is not None and live_speaker.get("start_at") is not None,
+                    "live_state": live_speaker.get("state") if live_speaker else None,
                     "notes": entry.get("notes") or [],
                 }
             )
