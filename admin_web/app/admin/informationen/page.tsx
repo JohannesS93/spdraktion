@@ -174,21 +174,17 @@ export default function InformationenPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<ParliamentInfo | null>(null);
+  const [agendaInfo, setAgendaInfo] = useState<ParliamentInfo | null>(null);
   const [factionSpeeches, setFactionSpeeches] = useState<FactionSpeech[]>([]);
   const [selectedTop, setSelectedTop] = useState<string | null>(null);
   const [selectedSessionDate, setSelectedSessionDate] = useState<string | null>(null);
 
-  const loadInfo = useCallback(async (sessionDate?: string | null) => {
+  const loadInfo = useCallback(async () => {
     setRefreshing(true);
     setError(null);
     try {
       const token = await auth.currentUser?.getIdToken();
-      const query = new URLSearchParams();
-      if (sessionDate) {
-        query.set("at", `${sessionDate}T12:00:00+02:00`);
-      }
-      const suffix = query.toString() ? `?${query.toString()}` : "";
-      const res = await fetch(`${API_BASE}/me/live-info${suffix}`, {
+      const res = await fetch(`${API_BASE}/me/live-info`, {
         cache: "no-store",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
@@ -198,13 +194,53 @@ export default function InformationenPage() {
       }
       const [data, speechesRes] = await Promise.all([
         res.json() as Promise<ParliamentInfo>,
-        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers${suffix}`, {
+        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers`, {
           cache: "no-store",
           headers: token ? { Authorization: `Bearer ${token}` } : {},
         }),
       ]);
       setInfo(data);
-      setSelectedSessionDate(data.current_session?.date ?? sessionDate ?? null);
+      setAgendaInfo((previous) => previous ?? data);
+      setSelectedSessionDate((previous) => previous ?? data.current_session?.date ?? null);
+      if (speechesRes.ok) {
+        const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
+        setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
+      } else {
+        setFactionSpeeches([]);
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  const loadAgendaForDate = useCallback(async (sessionDate?: string | null) => {
+    if (!sessionDate) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      const query = new URLSearchParams({ at: `${sessionDate}T12:00:00+02:00` });
+      const suffix = `?${query.toString()}`;
+      const [agendaRes, speechesRes] = await Promise.all([
+        fetch(`${API_BASE}/me/live-info${suffix}`, {
+          cache: "no-store",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }),
+        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers${suffix}`, {
+          cache: "no-store",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }),
+      ]);
+      if (!agendaRes.ok) {
+        const text = await agendaRes.text().catch(() => "");
+        throw new Error(text || `HTTP ${agendaRes.status}`);
+      }
+      const data = (await agendaRes.json()) as ParliamentInfo;
+      setAgendaInfo(data);
+      setSelectedSessionDate(sessionDate);
+      setSelectedTop(null);
       if (speechesRes.ok) {
         const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
         setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
@@ -238,10 +274,10 @@ export default function InformationenPage() {
   useEffect(() => {
     if (!session) return;
     const interval = window.setInterval(() => {
-      void loadInfo(selectedSessionDate);
+      void loadInfo();
     }, 60_000);
     return () => window.clearInterval(interval);
-  }, [loadInfo, selectedSessionDate, session]);
+  }, [loadInfo, session]);
 
   const runningBadge = useMemo(() => {
     if (!info) return null;
@@ -280,6 +316,12 @@ export default function InformationenPage() {
     });
   }, [info, selectedSessionDate]);
 
+  const isAgendaLiveDay = Boolean(
+    selectedSessionDate &&
+      info?.current_session?.date &&
+      selectedSessionDate === info.current_session.date,
+  );
+
   if (loading || !session) {
     return <div className="p-8 text-sm text-slate-500">Lade Informationen…</div>;
   }
@@ -302,28 +344,6 @@ export default function InformationenPage() {
       }
     >
       <div className="space-y-6 p-6">
-        {visibleSessionDays.length > 0 ? (
-          <div className="flex flex-wrap gap-2 border border-slate-200 bg-white p-3">
-            {visibleSessionDays.map((day) => {
-              const isSelected = day.date === selectedSessionDate;
-              return (
-                <button
-                  key={day.date ?? day.date_text}
-                  type="button"
-                  onClick={() => void loadInfo(day.date ?? null)}
-                  className={`rounded-full border px-3 py-1.5 text-sm transition ${
-                    isSelected
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
-                  }`}
-                >
-                  {day.date_text || day.date || "Sitzungstag"}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-3">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -385,14 +405,39 @@ export default function InformationenPage() {
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-2">
             <CardTitle className="text-xl">Aktuelle Sitzungsagenda</CardTitle>
+            {visibleSessionDays.length > 0 ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {visibleSessionDays.map((day) => {
+                  const isSelected = day.date === selectedSessionDate;
+                  return (
+                    <button
+                      key={day.date ?? day.date_text}
+                      type="button"
+                      onClick={() => void loadAgendaForDate(day.date ?? null)}
+                      className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                        isSelected
+                          ? "border-slate-900 bg-slate-900 text-white"
+                          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:text-slate-900"
+                      }`}
+                    >
+                      {day.date_text || day.date || "Sitzungstag"}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
-              {(info?.agenda_points ?? []).map((point, index) => {
+              {(agendaInfo?.agenda_points ?? []).map((point, index) => {
                 const isCurrent =
-                  point.top === info?.current_top?.top && point.start_at === info?.current_top?.start_at;
+                  isAgendaLiveDay &&
+                  point.top === info?.current_top?.top &&
+                  point.start_at === info?.current_top?.start_at;
                 const isNext =
-                  point.top === info?.next_top?.top && point.start_at === info?.next_top?.start_at;
+                  isAgendaLiveDay &&
+                  point.top === info?.next_top?.top &&
+                  point.start_at === info?.next_top?.start_at;
                 const topKeys = normalizeTopLabels(point.top);
                 const speakers = Array.from(
                   new Map(
@@ -470,7 +515,7 @@ export default function InformationenPage() {
                                   <div className="font-medium text-slate-900">
                                     {speaker.speaker_name || "Unbekannt"}
                                   </div>
-                                  {speaker.has_live_time ? (
+                                  {isAgendaLiveDay && speaker.has_live_time ? (
                                     <div className="mt-1 text-sm text-slate-500">
                                       Live-Zeit: {formatTime(speaker.effective_start_at)}
                                     </div>
@@ -562,9 +607,6 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
     <Card className="rounded-none border-slate-200">
       <CardHeader className="pb-2">
         <CardTitle className="text-lg">Nächste namentliche Abstimmung</CardTitle>
-        <p className="text-sm text-slate-500">
-          Diese Information soll später im Mobile-Infoscreen als eigener Kasten erscheinen.
-        </p>
       </CardHeader>
       <CardContent>
         {rollCall ? (
@@ -630,9 +672,6 @@ function SpeechCard({
     <Card className="rounded-none border-slate-200">
       <CardHeader className="pb-2">
         <CardTitle className="text-lg">Nächste Rede</CardTitle>
-        <p className="text-sm text-slate-500">
-          Dieser Block bleibt sichtbar, bis wir eine belastbare offizielle Redequelle anbinden können.
-        </p>
       </CardHeader>
       <CardContent>
         {speech ? (
@@ -642,9 +681,7 @@ function SpeechCard({
           </div>
         ) : (
           <div className="text-sm text-slate-500">
-            {source === "not_available_yet"
-              ? "Aktuell ist noch keine offizielle Redequelle im Backend angebunden."
-              : "Für den aktuellen Datenstand wurde keine kommende Rede erkannt."}
+            Für den aktuellen Datenstand wurde keine kommende Rede erkannt.
           </div>
         )}
       </CardContent>
@@ -657,9 +694,6 @@ function PgfDutyCard({ duty }: { duty?: ServiceDuty | null }) {
     <Card className="rounded-none border-slate-200">
       <CardHeader className="pb-2">
         <CardTitle className="text-lg">Nächster PGF-Dienst</CardTitle>
-        <p className="text-sm text-slate-500">
-          Dieser Block spiegelt die nächste eingeteilte PGF-Schicht des eingeloggten Nutzers.
-        </p>
       </CardHeader>
       <CardContent>
         {duty ? (

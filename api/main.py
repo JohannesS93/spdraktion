@@ -3846,6 +3846,9 @@ def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: 
 
 
 def _build_live_speaker_lookup(parliament_payload: dict | None) -> dict[tuple[str, str], dict]:
+    if parliament_payload and parliament_payload.get("mode") != "live":
+        return {}
+
     speaker_payload = _parse_bundestag_speaker()
     if not speaker_payload.get("live"):
         return {}
