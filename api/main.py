@@ -11,6 +11,8 @@ import os
 import re
 import random
 import threading
+import time
+import unicodedata
 from datetime import date
 from typing import Optional, Literal
 from uuid import UUID
@@ -59,9 +61,12 @@ MAIL_IMPORT_IMAP_PORT = int(os.environ.get("MAIL_IMPORT_IMAP_PORT", "993"))
 MAIL_IMPORT_USERNAME = os.environ.get("MAIL_IMPORT_USERNAME", "").strip()
 MAIL_IMPORT_PASSWORD = os.environ.get("MAIL_IMPORT_PASSWORD", "").strip()
 MAIL_IMPORT_LOOKBACK_DAYS = int(os.environ.get("MAIL_IMPORT_LOOKBACK_DAYS", "14"))
+MAIL_IMPORT_POLL_MINUTES = int(os.environ.get("MAIL_IMPORT_POLL_MINUTES", "5"))
 PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES = int(
     os.environ.get("PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES", "60")
 )
+_mail_import_worker_started = False
+_mail_import_worker_lock = threading.Lock()
 
 
 def _load_firebase_credentials():
@@ -385,6 +390,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def _startup_background_jobs():
+    _start_mail_import_worker()
 
 DB_URL = os.environ.get(
     "DATABASE_URL", "postgresql://spd_app:change_me_strong@localhost:5432/spd_dev"
@@ -2879,6 +2889,31 @@ def _mail_import_enabled() -> bool:
     return bool(MAIL_IMPORT_USERNAME and MAIL_IMPORT_PASSWORD)
 
 
+def _normalize_text_key(value: str | None) -> str:
+    if not value:
+        return ""
+
+    normalized = unicodedata.normalize("NFKD", value)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    normalized = normalized.lower()
+    normalized = normalized.replace("ß", "ss")
+    normalized = re.sub(r"\b(?:dr|prof|professor|psts|bm|bmin|bk)\.?\b", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _is_probable_kurzuebersicht_name(value: str | None) -> bool:
+    haystack = _normalize_text_key(value)
+    if not haystack:
+        return False
+    return (
+        "kurzuebersicht" in haystack
+        or "aktuelle ku" in haystack
+        or re.search(r"(^| )ku($| )", haystack) is not None
+    )
+
+
 def _all_active_user_ids() -> list[str]:
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -3044,18 +3079,7 @@ def _notify_new_document(
 
 
 def _classify_mail_attachment(subject: str, filename: str) -> str | None:
-    normalized_filename = (
-        filename.lower()
-        .replace("ä", "ae")
-        .replace("ö", "oe")
-        .replace("ü", "ue")
-        .replace("ß", "ss")
-    )
-    if (
-        "kurzuebersicht" in normalized_filename
-        or "aktuelle kue" in normalized_filename
-        or re.search(r"(^|[^a-z])kue([^a-z]|$)", normalized_filename)
-    ):
+    if _is_probable_kurzuebersicht_name(filename) or _is_probable_kurzuebersicht_name(subject):
         return "kurzuebersicht"
     return None
 
@@ -3066,6 +3090,56 @@ def _build_import_title(category: str, subject: str, filename: str) -> str:
     if category == "kurzuebersicht":
         return cleaned_filename or cleaned_subject or "Kurzübersicht"
     return cleaned_subject or cleaned_filename or "Datei aus Mailimport"
+
+
+def _load_latest_document_record(category: str) -> dict | None:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    title,
+                    filename_original,
+                    mime_type,
+                    stored_filename,
+                    created_at
+                FROM documents
+                WHERE category = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (category,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": str(row[0]),
+        "title": row[1],
+        "filename": row[2],
+        "mime_type": row[3],
+        "stored_filename": row[4],
+        "created_at": row[5].isoformat() if row[5] else None,
+    }
+
+
+def _extract_document_bytes(document: dict | None) -> bytes | None:
+    if not document:
+        return None
+
+    stored_filename = (document.get("stored_filename") or "").strip()
+    if not stored_filename:
+        return None
+
+    file_path = os.path.join(UPLOAD_DIR, stored_filename)
+    if not os.path.exists(file_path):
+        return None
+
+    with open(file_path, "rb") as handle:
+        return handle.read()
 
 
 def _attachment_already_imported(
@@ -3232,6 +3306,306 @@ def run_mail_import_once():
         "imported_documents": len(imported),
         "imported": imported,
     }
+
+
+def _normalize_kurzuebersicht_line(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").replace("\u00a0", " ")).strip()
+
+
+def _parse_kurzuebersicht_date(value: str) -> date | None:
+    date_match = re.match(
+        r"^(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag), (\d{1,2})\. ([A-Za-zÄÖÜäöüß]+) (\d{4})$",
+        value,
+    )
+    if not date_match:
+        return None
+
+    month_map = {
+        "Januar": 1,
+        "Februar": 2,
+        "März": 3,
+        "April": 4,
+        "Mai": 5,
+        "Juni": 6,
+        "Juli": 7,
+        "August": 8,
+        "September": 9,
+        "Oktober": 10,
+        "November": 11,
+        "Dezember": 12,
+    }
+
+    month = month_map.get(date_match.group(3))
+    if not month:
+        return None
+
+    return date(int(date_match.group(4)), month, int(date_match.group(2)))
+
+
+def _is_kurzuebersicht_time_line(value: str) -> bool:
+    return re.match(r"^(?:ca\.\s*)?\d{1,2}:\d{2}$", value) is not None
+
+
+def _is_kurzuebersicht_top_line(value: str) -> bool:
+    return re.match(r"^(?:ZP\s+)?\d+(?:\+\d+)?[a-z]?$", value) is not None
+
+
+def _is_kurzuebersicht_duration_line(value: str) -> bool:
+    compact = value.replace(" ", "")
+    return (
+        re.match(r"^(?:\+)?\d+\s*Min\.$", value) is not None
+        or compact in {"Aussprache", "Kernzeit"}
+        or "Ausschuss-" in value
+        or "vorsitzende" in value.lower()
+    )
+
+
+def _is_probable_speaker_line(value: str) -> bool:
+    candidate = re.sub(r"\s+\d+$", "", value).strip()
+    if not candidate or len(candidate) > 110:
+        return False
+    if candidate.lower().startswith("ca. "):
+        return False
+    if candidate in {"Namentliche Abstimmung", "weitere Beratungen", "wird abgesetzt"}:
+        return False
+    if candidate.startswith(("Aktuelle Stunde", "Vereinbarte Debatte", "Unterrichtung", "Befragung", "Fragestunde")):
+        return False
+    if re.search(r"\b(Minuten|parallel zum Plenum|Durchführung der Namentlichen Abstimmung)\b", candidate):
+        return False
+
+    speaker_pattern = re.compile(
+        r"^(?:Dr\.|Prof\.|Prof\. Dr\.|PStS|BM['’]?in|BM|BK|N\. N\.|[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+)"
+        r"(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+)+(?:\s*\([^)]*\))?(?:\s*\*.*)?$"
+    )
+    return speaker_pattern.match(candidate) is not None
+
+
+def _clean_kurzuebersicht_speaker_name(value: str) -> str:
+    cleaned = re.sub(r"\s+\d+$", "", value).strip()
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned).strip()
+    cleaned = re.sub(r"\s*\*.*$", "", cleaned).strip()
+    return cleaned
+
+
+def _load_name_directory() -> dict[str, dict]:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    id::text,
+                    first_name,
+                    last_name,
+                    email,
+                    role
+                FROM users
+                WHERE COALESCE(is_active, true) = true
+                ORDER BY
+                    COALESCE(last_name, '') ASC,
+                    COALESCE(first_name, '') ASC,
+                    email ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    directory: dict[str, dict] = {}
+    for row in rows:
+        full_name = " ".join(part for part in [row[1], row[2]] if part).strip()
+        if not full_name:
+            continue
+        directory[_normalize_text_key(full_name)] = {
+            "user_id": row[0],
+            "full_name": full_name,
+            "email": row[3],
+            "role": row[4],
+        }
+    return directory
+
+
+def _parse_kurzuebersicht_entries(pdf_bytes: bytes) -> list[dict]:
+    reader = PdfReader(BytesIO(pdf_bytes))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    lines = [_normalize_kurzuebersicht_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+
+    entries: list[dict] = []
+    current_date: date | None = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        parsed_date = _parse_kurzuebersicht_date(line)
+        if parsed_date is not None:
+            current_date = parsed_date
+            i += 1
+            continue
+
+        if current_date is None or not _is_kurzuebersicht_time_line(line):
+            i += 1
+            continue
+
+        start_label = line.replace("ca. ", "").strip()
+        top_labels: list[str] = []
+        block_lines: list[str] = []
+        i += 1
+
+        while i < len(lines):
+            current = lines[i]
+            if _parse_kurzuebersicht_date(current) is not None or _is_kurzuebersicht_time_line(current):
+                break
+            if current.startswith("21. Wahlperiode") or current == "Tagesordnung":
+                i += 1
+                continue
+            if _is_kurzuebersicht_duration_line(current):
+                i += 1
+                continue
+            if _is_kurzuebersicht_top_line(current):
+                top_labels.append(current)
+                i += 1
+                continue
+            break
+
+        while i < len(lines):
+            current = lines[i]
+            if _parse_kurzuebersicht_date(current) is not None or _is_kurzuebersicht_time_line(current):
+                break
+            if current.startswith("21. Wahlperiode") or current == "Tagesordnung":
+                i += 1
+                continue
+            if re.match(r"^\d+$", current):
+                i += 1
+                continue
+            if not _is_kurzuebersicht_duration_line(current):
+                block_lines.append(current)
+            i += 1
+
+        title_lines: list[str] = []
+        speaker_lines: list[str] = []
+        notes: list[str] = []
+        speaker_mode = False
+
+        for block_line in block_lines:
+            if block_line in {"Namentliche Abstimmung", "weitere Beratungen", "wird abgesetzt"}:
+                notes.append(block_line)
+                speaker_mode = True
+                continue
+            if block_line.lower().startswith("ca. ") and "durchführung der namentlichen abstimmung" in block_line.lower():
+                notes.append(block_line)
+                speaker_mode = True
+                continue
+            if _is_probable_speaker_line(block_line):
+                speaker_mode = True
+                speaker_lines.append(block_line)
+                continue
+            if speaker_mode:
+                notes.append(block_line)
+            else:
+                title_lines.append(block_line)
+
+        title = " ".join(title_lines).strip() or None
+        speakers = [_clean_kurzuebersicht_speaker_name(item) for item in speaker_lines if item.strip()]
+        if not title and not speakers:
+            continue
+
+        start_at = datetime.combine(
+            current_date,
+            datetime.strptime(start_label, "%H:%M").time(),
+            tzinfo=EUROPE_BERLIN,
+        )
+        entries.append(
+            {
+                "date": current_date.isoformat(),
+                "start_at": start_at.isoformat(),
+                "time_label": line,
+                "top_labels": top_labels,
+                "title": title,
+                "speakers": speakers,
+                "notes": notes,
+            }
+        )
+
+    return entries
+
+
+def _build_latest_kurzuebersicht_payload() -> dict | None:
+    document = _load_latest_document_record("kurzuebersicht")
+    pdf_bytes = _extract_document_bytes(document)
+    if not document or not pdf_bytes:
+        return None
+
+    entries = _parse_kurzuebersicht_entries(pdf_bytes)
+    directory = _load_name_directory()
+    enriched_entries: list[dict] = []
+    for entry in entries:
+        matched_speakers = []
+        unmatched_speakers = []
+        for speaker_name in entry["speakers"]:
+            match = directory.get(_normalize_text_key(speaker_name))
+            if match:
+                matched_speakers.append(
+                    {
+                        "name": speaker_name,
+                        "user_id": match["user_id"],
+                        "matched_full_name": match["full_name"],
+                        "role": match["role"],
+                        "email": match["email"],
+                    }
+                )
+            else:
+                unmatched_speakers.append(speaker_name)
+
+        enriched_entries.append(
+            {
+                **entry,
+                "matched_speakers": matched_speakers,
+                "unmatched_speakers": unmatched_speakers,
+            }
+        )
+
+    return {
+        "document": {
+            "id": document["id"],
+            "title": document["title"],
+            "filename": document["filename"],
+            "created_at": document["created_at"],
+        },
+        "entries": enriched_entries,
+    }
+
+
+def _mail_import_worker_loop():
+    while True:
+        try:
+            result = run_mail_import_once()
+            print(
+                "MAIL IMPORT POLL processed={processed} imported={imported}".format(
+                    processed=result.get("processed_messages", 0),
+                    imported=result.get("imported_documents", 0),
+                ),
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"MAIL IMPORT POLL FAILED error={exc}", flush=True)
+
+        sleep_seconds = max(MAIL_IMPORT_POLL_MINUTES, 1) * 60
+        time.sleep(sleep_seconds)
+
+
+def _start_mail_import_worker():
+    global _mail_import_worker_started
+
+    if not _mail_import_enabled() or MAIL_IMPORT_POLL_MINUTES <= 0:
+        return
+
+    with _mail_import_worker_lock:
+        if _mail_import_worker_started:
+            return
+        thread = threading.Thread(target=_mail_import_worker_loop, name="mail-import-poller", daemon=True)
+        thread.start()
+        _mail_import_worker_started = True
+        print(
+            f"MAIL IMPORT POLL STARTED interval_minutes={MAIL_IMPORT_POLL_MINUTES}",
+            flush=True,
+        )
 
 
 def ensure_parliament_reminder_tables():
@@ -3608,6 +3982,15 @@ def upload_document(
 def admin_run_mail_import(authorization: str | None = Header(default=None)):
     require_admin(authorization)
     return run_mail_import_once()
+
+
+@app.get("/admin/kurzuebersicht/latest")
+def admin_get_latest_kurzuebersicht(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    payload = _build_latest_kurzuebersicht_payload()
+    if not payload:
+        raise HTTPException(status_code=404, detail="Keine Kurzübersicht vorhanden")
+    return payload
 
 # -----------------------------
 # Me

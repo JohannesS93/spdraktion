@@ -70,14 +70,24 @@ Oder über den Admin-Endpunkt:
 
 `POST /admin/mail-import/run`
 
-## Empfohlene Automatisierung
+## Automatisierung
 
-Empfohlen ist ein Server-Cron alle 5 Minuten.
+Der produktive API-Container pollt das Postfach jetzt selbst automatisch.
 
-Beispiel:
+Standard:
 
-```cron
-*/5 * * * * cd /pfad/zum/spd-app/api && set -a && . /pfad/zum/spd-app/deploy/secrets/webmaster-imap.env && set +a && export FIREBASE_CRED_PATH=/pfad/zum/spd-app/deploy/secrets/firebase-adminsdk.json && export FIREBASE_PROJECT_ID=spd-fraktion-intern && export DATABASE_URL='postgresql://...' && ./.venv/bin/python run_mail_import.py >> /var/log/spd-mail-import.log 2>&1
+- `MAIL_IMPORT_POLL_MINUTES=5`
+
+Wichtig:
+
+- die Datei `deploy/secrets/webmaster-imap.env` wird beim Deploy automatisch mit auf den Server synchronisiert
+- im Compose-Setup wird sie als optionales `env_file` an die API gehängt
+- sobald Benutzername und Passwort vorhanden sind, startet der Poller beim API-Start automatisch
+
+Zum Deaktivieren:
+
+```env
+MAIL_IMPORT_POLL_MINUTES=0
 ```
 
 ## Nächste sinnvolle Erweiterung

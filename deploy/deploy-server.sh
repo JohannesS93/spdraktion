@@ -47,6 +47,20 @@ sync_dir() {
     "$REMOTE_USER@$REMOTE_HOST:$remote_dir/"
 }
 
+sync_optional_file() {
+  local source_file="$1"
+  local remote_file="$2"
+
+  if [[ ! -f "$source_file" ]]; then
+    return 0
+  fi
+
+  rsync -az \
+    -e "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -i $SSH_KEY" \
+    "$source_file" \
+    "$REMOTE_USER@$REMOTE_HOST:$remote_file"
+}
+
 require_cmd ssh
 require_cmd rsync
 
@@ -62,6 +76,9 @@ sync_dir "$ROOT_DIR/admin_web" "$REMOTE_PATH/admin_web"
 echo "Synchronisiere Deploy-Dateien ..."
 sync_dir "$ROOT_DIR/deploy" "$REMOTE_PATH/deploy"
 
+echo "Synchronisiere optionale Secrets ..."
+sync_optional_file "$ROOT_DIR/deploy/secrets/webmaster-imap.env" "$REMOTE_DEPLOY_DIR/secrets/webmaster-imap.env"
+
 echo "Starte produktiven Compose-Deploy ..."
 run_ssh "
   cd '$REMOTE_DEPLOY_DIR' &&
@@ -69,10 +86,21 @@ run_ssh "
   printf '\n---\n' &&
   docker compose --env-file .env -f docker-compose.oracle.yml ps &&
   printf '\n---\n' &&
-  curl -fsS https://api.spdfraktion-intern.de/docs >/dev/null &&
-  echo 'API erreichbar: https://api.spdfraktion-intern.de/docs' &&
-  curl -fsS https://spdfraktion-intern.de >/dev/null &&
-  echo 'Admin erreichbar: https://spdfraktion-intern.de'
+  for url in https://api.spdfraktion-intern.de/docs https://spdfraktion-intern.de; do
+    ok=0
+    for attempt in 1 2 3 4 5; do
+      if curl -fsS \"\$url\" >/dev/null; then
+        echo \"Erreichbar: \$url\"
+        ok=1
+        break
+      fi
+      sleep 3
+    done
+    if [ \"\$ok\" -ne 1 ]; then
+      echo \"Nicht erreichbar nach Retries: \$url\" >&2
+      exit 1
+    fi
+  done
 "
 
 echo
