@@ -13,6 +13,7 @@ import random
 import threading
 import time
 import unicodedata
+import zipfile
 from datetime import date
 from typing import Optional, Literal
 from uuid import UUID
@@ -32,7 +33,6 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import certifi
-from docx import Document as DocxDocument
 from pypdf import PdfReader
 from pypdf import PdfWriter
 from reportlab.lib.pagesizes import A4
@@ -2850,8 +2850,13 @@ def get_my_live_info(
         or principal["id"],
     }
     payload["next_pgf_duty"] = next_pgf_duty
-    payload["next_speech"] = None
-    payload["next_speech_source"] = "not_available_yet"
+    next_speech, next_speech_source = _build_next_speech_for_user(
+        principal["id"],
+        effective_at=comparison_at,
+        parliament_payload=payload,
+    )
+    payload["next_speech"] = next_speech
+    payload["next_speech_source"] = next_speech_source
     return payload
 
 
@@ -2924,8 +2929,19 @@ def _extract_pdf_page_texts(pdf_bytes: bytes) -> list[str]:
 
 
 def _extract_docx_text(docx_bytes: bytes) -> str:
-    document = DocxDocument(BytesIO(docx_bytes))
-    paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+    with zipfile.ZipFile(BytesIO(docx_bytes)) as archive:
+        document_xml = archive.read("word/document.xml")
+
+    root = ET.fromstring(document_xml)
+    paragraphs: list[str] = []
+    for paragraph in root.findall(".//w:p", namespace):
+        texts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+        combined = "".join(texts).strip()
+        if combined:
+            paragraphs.append(combined)
+
     return "\n".join(paragraphs)
 
 
@@ -3869,6 +3885,121 @@ def _build_latest_kurzuebersicht_payload() -> dict | None:
     }
 
 
+def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: dict | None) -> dict | None:
+    if not parliament_payload:
+        return None
+
+    top_labels = {
+        (label or "").strip().upper()
+        for label in (entry.get("top_labels") or [])
+        if (label or "").strip()
+    }
+    if not top_labels:
+        return None
+
+    candidates = []
+    for key in ("current_top", "next_top"):
+        point = parliament_payload.get(key) or {}
+        if point:
+            candidates.append(point)
+    candidates.extend(parliament_payload.get("agenda_points") or [])
+
+    for point in candidates:
+        point_top = (point.get("top") or "").strip().upper()
+        if point_top and point_top in top_labels:
+            return point
+
+    return None
+
+
+def _build_faction_speech_entries(parliament_payload: dict | None = None) -> list[dict]:
+    latest_payload = _build_latest_kurzuebersicht_payload()
+    if not latest_payload:
+        return []
+
+    speeches: list[dict] = []
+    for entry in latest_payload["entries"]:
+        live_point = _match_live_point_for_kurzuebersicht_entry(entry, parliament_payload)
+        effective_start_at = (live_point or {}).get("start_at") or entry.get("start_at")
+        for speaker in entry.get("matched_speakers") or []:
+            speeches.append(
+                {
+                    "user_id": speaker["user_id"],
+                    "speaker_name": speaker["matched_full_name"],
+                    "source_speaker_name": speaker["name"],
+                    "role": speaker.get("role"),
+                    "email": speaker.get("email"),
+                    "top_labels": entry.get("top_labels") or [],
+                    "top": (entry.get("top_labels") or [None])[0],
+                    "title": entry.get("title"),
+                    "planned_start_at": entry.get("start_at"),
+                    "effective_start_at": effective_start_at,
+                    "live_matched": live_point is not None,
+                    "notes": entry.get("notes") or [],
+                }
+            )
+
+    speeches.sort(key=lambda item: item.get("effective_start_at") or item.get("planned_start_at") or "")
+    return speeches
+
+
+def _build_next_speech_for_user(
+    user_id: str,
+    *,
+    effective_at: datetime,
+    parliament_payload: dict | None,
+) -> tuple[dict | None, str]:
+    speeches = _build_faction_speech_entries(parliament_payload=parliament_payload)
+    if not speeches:
+        return None, "kurzuebersicht_unavailable"
+
+    future_candidates = []
+    current_candidate = None
+    for speech in speeches:
+        if speech.get("user_id") != user_id:
+            continue
+
+        start_raw = speech.get("effective_start_at") or speech.get("planned_start_at")
+        start_at = _parse_iso_datetime(start_raw) if start_raw else None
+        if start_at is None:
+            continue
+
+        top_labels = {
+            (label or "").strip().upper()
+            for label in (speech.get("top_labels") or [])
+            if (label or "").strip()
+        }
+        current_top = (parliament_payload or {}).get("current_top") or {}
+        current_top_label = (current_top.get("top") or "").strip().upper()
+        if current_top_label and current_top_label in top_labels:
+            current_candidate = speech
+            break
+
+        if start_at >= effective_at:
+            future_candidates.append((start_at, speech))
+
+    chosen = current_candidate or (future_candidates[0][1] if future_candidates else None)
+    if not chosen:
+        return None, "kurzuebersicht_no_upcoming_speech"
+
+    source = "kurzuebersicht_planned_top"
+    if chosen.get("live_matched"):
+        source = "kurzuebersicht_live_top"
+
+    payload = {
+        "user_id": chosen["user_id"],
+        "speaker_name": chosen["speaker_name"],
+        "top": chosen.get("top"),
+        "top_labels": chosen.get("top_labels") or [],
+        "title": chosen.get("title"),
+        "start_at": chosen.get("effective_start_at") or chosen.get("planned_start_at"),
+        "planned_start_at": chosen.get("planned_start_at"),
+        "live_matched": chosen.get("live_matched", False),
+        "notes": chosen.get("notes") or [],
+    }
+    return payload, source
+
+
 def _mail_import_worker_loop():
     while True:
         try:
@@ -4288,6 +4419,21 @@ def admin_get_latest_kurzuebersicht(authorization: str | None = Header(default=N
     if not payload:
         raise HTTPException(status_code=404, detail="Keine Kurzübersicht vorhanden")
     return payload
+
+
+@app.get("/admin/kurzuebersicht/faction-speakers")
+def admin_get_kurzuebersicht_faction_speakers(
+    at: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    effective_at = _parse_iso_datetime(at) if at else None
+    parliament_payload = _build_parliament_live_payload(at=effective_at)
+    return {
+        "generated_at": datetime.now(EUROPE_BERLIN).isoformat(),
+        "effective_at": (effective_at or datetime.now(EUROPE_BERLIN)).isoformat(),
+        "speeches": _build_faction_speech_entries(parliament_payload=parliament_payload),
+    }
 
 # -----------------------------
 # Me
