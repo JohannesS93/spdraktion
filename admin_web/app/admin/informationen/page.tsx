@@ -92,6 +92,12 @@ type ParliamentInfo = {
     name?: string | null;
     active?: boolean;
   } | null;
+  viewer?: {
+    user_id?: string | null;
+    role?: string | null;
+    principal_user_id?: string | null;
+    principal_name?: string | null;
+  } | null;
   current_top?: ParliamentPoint | null;
   next_top?: ParliamentPoint | null;
   session_days?: Array<{
@@ -398,7 +404,10 @@ export default function InformationenPage() {
         </div>
 
         <div className="grid gap-6 xl:grid-cols-2">
-          <SpeechCard speech={info?.next_speech} source={info?.next_speech_source} />
+          <SpeechCard
+            speech={info?.next_speech}
+            principalName={info?.viewer?.principal_name}
+          />
           <PgfDutyCard duty={info?.next_pgf_duty} />
         </div>
 
@@ -663,15 +672,17 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
 
 function SpeechCard({
   speech,
-  source,
+  principalName,
 }: {
   speech?: { title?: string | null; start_at?: string | null } | null;
-  source?: string | null;
+  principalName?: string | null;
 }) {
   return (
     <Card className="rounded-none border-slate-200">
       <CardHeader className="pb-2">
-        <CardTitle className="text-lg">Nächste Rede</CardTitle>
+        <CardTitle className="text-lg">
+          {principalName ? `Nächste Rede - ${principalName}` : "Nächste Rede"}
+        </CardTitle>
       </CardHeader>
       <CardContent>
         {speech ? (
