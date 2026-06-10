@@ -109,6 +109,7 @@ type ParliamentInfo = {
     selected?: boolean;
   }>;
   next_roll_call?: RollCall | null;
+  weekly_roll_calls?: RollCall[];
   next_pgf_duty?: ServiceDuty | null;
   next_speech?: { title?: string | null; start_at?: string | null } | null;
   next_speech_source?: string | null;
@@ -171,6 +172,10 @@ function endOfWeek(date: Date) {
   copy.setDate(copy.getDate() + 6);
   copy.setHours(23, 59, 59, 999);
   return copy;
+}
+
+function isoDatePart(value?: string | null) {
+  return value ? value.slice(0, 10) : null;
 }
 
 export default function InformationenPage() {
@@ -403,6 +408,41 @@ export default function InformationenPage() {
           <RollCallCard rollCall={info?.next_roll_call} />
         </div>
 
+        <Card className="rounded-none border-slate-200">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg">Namentliche Abstimmungen diese Woche</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {(info?.weekly_roll_calls?.length ?? 0) > 0 ? (
+              <div className="space-y-3">
+                {info?.weekly_roll_calls?.map((rollCall, index) => (
+                  <div
+                    key={`${rollCall.top ?? "roll-call"}-${rollCall.end_at ?? rollCall.start_at ?? index}`}
+                    className="border border-slate-200 bg-slate-50 px-4 py-3"
+                  >
+                    <div className="text-xs uppercase tracking-[0.24em] text-slate-500">
+                      {rollCall.top || "Namentliche Abstimmung"}
+                    </div>
+                    <div className="mt-1 font-medium text-slate-900">
+                      {rollCall.title || "Namentliche Abstimmung"}
+                    </div>
+                    <div className="mt-2 text-sm text-slate-500">
+                      {formatDateTime(rollCall.end_at || rollCall.start_at)}
+                    </div>
+                    {rollCall.schedule_note ? (
+                      <div className="mt-2 text-sm text-slate-500">{rollCall.schedule_note}</div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500">
+                Für diese Woche wurden aktuell keine namentlichen Abstimmungen erkannt.
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         <div className="grid gap-6 xl:grid-cols-2">
           <SpeechCard
             speech={info?.next_speech}
@@ -448,10 +488,15 @@ export default function InformationenPage() {
                   point.top === info?.next_top?.top &&
                   point.start_at === info?.next_top?.start_at;
                 const topKeys = normalizeTopLabels(point.top);
+                const pointDate = isoDatePart(point.start_at);
                 const speakers = Array.from(
                   new Map(
                     topKeys
-                      .flatMap((key) => speakersByTop.get(key) ?? [])
+                      .flatMap((key) =>
+                        (speakersByTop.get(key) ?? []).filter(
+                          (speaker) => isoDatePart(speaker.planned_start_at) === pointDate,
+                        ),
+                      )
                       .map((speaker) => {
                         const displayName = (speaker.source_speaker_name || speaker.speaker_name || "Unbekannt").trim();
                         return [

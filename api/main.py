@@ -2226,6 +2226,24 @@ def _serialize_roll_call(point: dict | None) -> dict | None:
     }
 
 
+def _serialize_roll_call_event(item: dict | None) -> dict | None:
+    if item is None:
+        return None
+    return {
+        "top": item.get("top"),
+        "title": item.get("title"),
+        "article_id": item.get("article_id"),
+        "start_at": _iso_or_none(item.get("start_at")),
+        "end_at": _iso_or_none(item.get("end_at")),
+        "duration_minutes": item.get("duration_minutes"),
+        "location": item.get("location"),
+        "schedule_note": item.get("note"),
+        "pdf_url": item.get("pdf_url"),
+        "source_url": item.get("source_url"),
+        "article_title": item.get("article_title"),
+    }
+
+
 def _serialize_service_slot(slot: dict | None) -> dict | None:
     if slot is None:
         return None
@@ -2291,7 +2309,15 @@ def _build_parliament_live_payload(at: datetime | None = None) -> dict:
         sessions,
         effective_at,
     )
-    next_roll_call = _find_next_roll_call_point(sessions, effective_at)
+    weekly_roll_calls = _build_kurzuebersicht_roll_call_events()
+    next_roll_call = None
+    for item in weekly_roll_calls:
+        roll_call_at = item.get("end_at") or item.get("start_at")
+        if roll_call_at and roll_call_at >= effective_at:
+            next_roll_call = item
+            break
+    if next_roll_call is None:
+        next_roll_call = _find_next_roll_call_point(sessions, effective_at)
 
     session_running = current_point is not None
     if at is None and speaker["live"]:
@@ -2338,7 +2364,12 @@ def _build_parliament_live_payload(at: datetime | None = None) -> dict:
         ],
         "current_top": _serialize_parliament_point(current_point),
         "next_top": _serialize_parliament_point(next_point),
-        "next_roll_call": _serialize_roll_call(next_roll_call),
+        "next_roll_call": (
+            _serialize_roll_call_event(next_roll_call)
+            if isinstance(next_roll_call, dict) and next_roll_call.get("source")
+            else _serialize_roll_call(next_roll_call)
+        ),
+        "weekly_roll_calls": [_serialize_roll_call_event(item) for item in weekly_roll_calls],
         "agenda_points": [
             _serialize_parliament_point(point)
             for point in (current_session.get("points") if current_session else [])
@@ -3843,6 +3874,124 @@ def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: 
             return point
 
     return None
+
+
+def _normalize_parliament_top_labels(value: str | None) -> list[str]:
+    raw = (value or "").strip().upper()
+    if not raw:
+        return []
+    normalized = raw.replace("TOP ", "").replace("ZP ", "ZP ")
+    return [part.strip() for part in normalized.split(",") if part.strip()]
+
+
+def _find_session_point_for_kurzuebersicht_entry(entry: dict, sessions: list[dict]) -> dict | None:
+    top_labels = {
+        (label or "").strip().upper()
+        for label in (entry.get("top_labels") or [])
+        if (label or "").strip()
+    }
+    entry_date = entry.get("date")
+    if not top_labels or not entry_date:
+        return None
+
+    for session in sessions:
+        session_date = session.get("date")
+        if session_date is None or session_date.isoformat() != entry_date:
+            continue
+        for point in session.get("points") or []:
+            point_labels = set(_normalize_parliament_top_labels(point.get("top")))
+            if point_labels & top_labels:
+                return point
+
+    return None
+
+
+def _build_kurzuebersicht_roll_call_events() -> list[dict]:
+    latest_payload = _build_latest_kurzuebersicht_payload()
+    if not latest_payload:
+        return []
+
+    sessions = _parse_bundestag_conferences()
+    events: list[dict] = []
+    for entry in latest_payload["entries"]:
+        top_labels = entry.get("top_labels") or []
+        title = entry.get("title")
+        point = _find_session_point_for_kurzuebersicht_entry(entry, sessions)
+        primary_top = (top_labels[0] if top_labels else None) or None
+
+        note_roll_calls = []
+        for note in entry.get("notes") or []:
+            match = re.search(
+                r"ca\.\s*(\d{1,2}:\d{2})\s+bis\s+(\d{1,2}:\d{2}).*?Namentlichen Abstimmung zu\s+((?:ZP|TOP)\s*\d+[a-z]?)",
+                note,
+                re.IGNORECASE,
+            )
+            if not match:
+                continue
+            start_label, end_label, top_label = match.groups()
+            entry_date = datetime.fromisoformat(entry["start_at"]).date()
+            start_at = datetime.combine(
+                entry_date,
+                datetime.strptime(start_label, "%H:%M").time(),
+                tzinfo=EUROPE_BERLIN,
+            )
+            end_at = datetime.combine(
+                entry_date,
+                datetime.strptime(end_label, "%H:%M").time(),
+                tzinfo=EUROPE_BERLIN,
+            )
+            duration_match = re.search(r"(\d+)\s*Minuten", note, re.IGNORECASE)
+            note_roll_calls.append(
+                {
+                    "top": re.sub(r"\s+", " ", top_label.upper()).strip(),
+                    "title": title,
+                    "start_at": start_at,
+                    "end_at": end_at,
+                    "duration_minutes": int(duration_match.group(1)) if duration_match else None,
+                    "note": note,
+                    "pdf_url": latest_payload["document"].get("filename"),
+                    "source": "kurzuebersicht_note",
+                }
+            )
+
+        if note_roll_calls:
+            events.extend(note_roll_calls)
+            continue
+
+        title_and_notes = " ".join(
+            [title or "", *[note for note in (entry.get("notes") or []) if note]]
+        ).lower()
+        if "namentliche abstimmung" not in title_and_notes:
+            continue
+
+        end_at = _point_effective_end(point) if point else None
+        start_at = point.get("start_at") if point else datetime.fromisoformat(entry["start_at"])
+        events.append(
+            {
+                "top": primary_top,
+                "title": title,
+                "start_at": start_at,
+                "end_at": end_at or start_at,
+                "duration_minutes": None,
+                "note": None,
+                "pdf_url": None,
+                "source": "kurzuebersicht_entry",
+            }
+        )
+
+    deduped: dict[tuple[str, str, str], dict] = {}
+    for item in events:
+        key = (
+            (item.get("top") or "").strip().upper(),
+            _iso_or_none(item.get("start_at")) or "",
+            _iso_or_none(item.get("end_at")) or "",
+        )
+        deduped[key] = item
+
+    return sorted(
+        deduped.values(),
+        key=lambda item: (_iso_or_none(item.get("start_at")) or _iso_or_none(item.get("end_at")) or ""),
+    )
 
 
 def _build_live_speaker_lookup(parliament_payload: dict | None) -> dict[tuple[str, str], dict]:
