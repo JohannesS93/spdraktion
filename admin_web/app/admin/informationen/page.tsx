@@ -625,7 +625,7 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
             </div>
             <div className="text-base font-semibold text-slate-900">{pointLabel(rollCall)}</div>
             <div className="text-sm text-slate-500">
-              {formatDateTime(rollCall.start_at)} bis {formatTime(rollCall.end_at)}
+              {formatDateTime(rollCall.end_at || rollCall.start_at)}
             </div>
             {rollCall.duration_minutes || rollCall.location ? (
               <div className="text-sm text-slate-500">
