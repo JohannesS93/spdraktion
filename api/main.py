@@ -13,7 +13,6 @@ import random
 import threading
 import time
 import unicodedata
-import zipfile
 from datetime import date
 from typing import Optional, Literal
 from uuid import UUID
@@ -35,8 +34,6 @@ import requests
 import certifi
 from pypdf import PdfReader
 from pypdf import PdfWriter
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 import uuid
 from planner_engine import (
     ExistingAssignment as PlannerExistingAssignment,
@@ -2928,23 +2925,6 @@ def _extract_pdf_page_texts(pdf_bytes: bytes) -> list[str]:
     return [page.extract_text() or "" for page in reader.pages]
 
 
-def _extract_docx_text(docx_bytes: bytes) -> str:
-    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-
-    with zipfile.ZipFile(BytesIO(docx_bytes)) as archive:
-        document_xml = archive.read("word/document.xml")
-
-    root = ET.fromstring(document_xml)
-    paragraphs: list[str] = []
-    for paragraph in root.findall(".//w:p", namespace):
-        texts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
-        combined = "".join(texts).strip()
-        if combined:
-            paragraphs.append(combined)
-
-    return "\n".join(paragraphs)
-
-
 def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -3024,46 +3004,6 @@ def _format_kurzuebersicht_title(stand: datetime) -> str:
     calendar_week = stand.isocalendar().week
     month_label = month_names.get(stand.month, f"{stand.month:02d}")
     return f"KÜ {calendar_week} Stand {stand.day:02d}-{month_label} {stand.hour:02d}Uhr"
-
-
-def _render_text_as_pdf(text: str) -> bytes:
-    buffer = BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    margin_x = 40
-    margin_y = 40
-    max_width = width - (margin_x * 2)
-
-    def draw_wrapped_line(line: str, y_pos: float) -> float:
-        words = line.split()
-        current = ""
-        y_current = y_pos
-        for word in words or [""]:
-            test = word if not current else f"{current} {word}"
-            if current and pdf.stringWidth(test, "Helvetica", 11) > max_width:
-                pdf.drawString(margin_x, y_current, current)
-                y_current -= 16
-                current = word
-            else:
-                current = test
-        pdf.drawString(margin_x, y_current, current)
-        return y_current - 16
-
-    y = height - margin_y
-    pdf.setFont("Helvetica", 11)
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        if y < margin_y:
-            pdf.showPage()
-            pdf.setFont("Helvetica", 11)
-            y = height - margin_y
-        if not line:
-            y -= 12
-            continue
-        y = draw_wrapped_line(line, y)
-
-    pdf.save()
-    return buffer.getvalue()
 
 
 def _all_active_user_ids() -> list[str]:
@@ -3442,33 +3382,6 @@ def _prepare_kurzuebersicht_pdf(payload: bytes) -> dict | None:
     }
 
 
-def _prepare_kurzuebersicht_docx(payload: bytes) -> dict | None:
-    text = _extract_docx_text(payload)
-    if not text:
-        return None
-
-    metadata = _extract_kurzuebersicht_header_metadata(text)
-    if not metadata:
-        return None
-
-    cleaned_text = text
-    tagesordnung_match = re.search(r"(^|\n)Tagesordnung(\n|$)", cleaned_text, flags=re.IGNORECASE)
-    if tagesordnung_match:
-        cleaned_text = cleaned_text[:tagesordnung_match.start()].rstrip()
-
-    stand = metadata["stand"]
-    title = _format_kurzuebersicht_title(stand)
-    pdf_bytes = _render_text_as_pdf(cleaned_text)
-    return {
-        "category": "kurzuebersicht",
-        "title": title,
-        "filename": f"{title}.pdf",
-        "mime_type": "application/pdf",
-        "content_bytes": pdf_bytes,
-        "stand": stand,
-    }
-
-
 def _prepare_mail_attachment(subject: str, filename: str, payload: bytes, mime_type: str | None) -> dict | None:
     lower_filename = (filename or "").lower()
     lower_mime = (mime_type or "").lower()
@@ -3477,8 +3390,6 @@ def _prepare_mail_attachment(subject: str, filename: str, payload: bytes, mime_t
     try:
         if lower_filename.endswith(".pdf") or lower_mime == "application/pdf":
             candidate = _prepare_kurzuebersicht_pdf(payload)
-        elif lower_filename.endswith(".docx") or "officedocument.wordprocessingml.document" in lower_mime:
-            candidate = _prepare_kurzuebersicht_docx(payload)
     except Exception as exc:
         print(f"MAIL IMPORT PREP FAILED filename={filename} error={exc}", flush=True)
         return None
@@ -3548,7 +3459,6 @@ def run_mail_import_once():
                 lower_filename = filename.lower()
                 if not (
                     lower_filename.endswith(".pdf")
-                    or lower_filename.endswith(".docx")
                     or "kurz" in _normalize_text_key(subject)
                     or "tagesordnung" in _normalize_text_key(subject)
                 ):

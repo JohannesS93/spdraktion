@@ -40,9 +40,9 @@ Aktuell gilt:
 
 - erste Seite bzw. Dokumentanfang muss mit `Kurzübersicht über Plenarthemen vom ...` arbeiten
 - darunter muss eine `Stand:`-Zeile stehen
+- importiert werden nur Anhänge im `pdf`-Format
 - importiert wird nur, wenn dieser `Stand` neuer ist als der zuletzt importierte KÜ-Stand
 - wenn eine Kombi-Datei auch die `Tagesordnung` enthält, wird dieser Teil vor dem Speichern abgeschnitten
-- liegt die KÜ als `docx` vor, wird sie für die App in ein PDF umgewandelt
 
 Der gespeicherte Dateiname folgt immer dem Schema:
 
