@@ -32,7 +32,11 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import certifi
+from docx import Document as DocxDocument
 from pypdf import PdfReader
+from pypdf import PdfWriter
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 import uuid
 from planner_engine import (
     ExistingAssignment as PlannerExistingAssignment,
@@ -2914,6 +2918,138 @@ def _is_probable_kurzuebersicht_name(value: str | None) -> bool:
     )
 
 
+def _extract_pdf_page_texts(pdf_bytes: bytes) -> list[str]:
+    reader = PdfReader(BytesIO(pdf_bytes))
+    return [page.extract_text() or "" for page in reader.pages]
+
+
+def _extract_docx_text(docx_bytes: bytes) -> str:
+    document = DocxDocument(BytesIO(docx_bytes))
+    paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    return "\n".join(paragraphs)
+
+
+def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
+    if not value:
+        return None
+
+    month_map = {
+        "januar": 1,
+        "februar": 2,
+        "märz": 3,
+        "maerz": 3,
+        "april": 4,
+        "mai": 5,
+        "juni": 6,
+        "juli": 7,
+        "august": 8,
+        "september": 9,
+        "oktober": 10,
+        "november": 11,
+        "dezember": 12,
+    }
+
+    match = re.search(
+        r"Stand:\s*(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]+)\s*(\d{4}),\s*(\d{1,2})[:.](\d{2})\s*Uhr",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    month_key = _normalize_text_key(match.group(2))
+    month = month_map.get(month_key)
+    if not month:
+        return None
+
+    return datetime(
+        int(match.group(3)),
+        month,
+        int(match.group(1)),
+        int(match.group(4)),
+        int(match.group(5)),
+        tzinfo=EUROPE_BERLIN,
+    )
+
+
+def _extract_kurzuebersicht_header_metadata(text: str) -> dict | None:
+    normalized_text = text.replace("\u00a0", " ")
+    title_match = re.search(
+        r"Kurzübersicht über Plenarthemen vom\s+(.+)",
+        normalized_text,
+        flags=re.IGNORECASE,
+    )
+    stand = _parse_kurzuebersicht_stand(normalized_text)
+    if not title_match or stand is None:
+        return None
+
+    title_line = re.sub(r"\s+", " ", title_match.group(0)).strip()
+    return {
+        "title_line": title_line,
+        "stand": stand,
+    }
+
+
+def _format_kurzuebersicht_title(stand: datetime) -> str:
+    month_names = {
+        1: "Jan",
+        2: "Feb",
+        3: "Mrz",
+        4: "Apr",
+        5: "Mai",
+        6: "Jun",
+        7: "Jul",
+        8: "Aug",
+        9: "Sep",
+        10: "Okt",
+        11: "Nov",
+        12: "Dez",
+    }
+    calendar_week = stand.isocalendar().week
+    month_label = month_names.get(stand.month, f"{stand.month:02d}")
+    return f"KÜ {calendar_week} Stand {stand.day:02d}-{month_label} {stand.hour:02d}Uhr"
+
+
+def _render_text_as_pdf(text: str) -> bytes:
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin_x = 40
+    margin_y = 40
+    max_width = width - (margin_x * 2)
+
+    def draw_wrapped_line(line: str, y_pos: float) -> float:
+        words = line.split()
+        current = ""
+        y_current = y_pos
+        for word in words or [""]:
+            test = word if not current else f"{current} {word}"
+            if current and pdf.stringWidth(test, "Helvetica", 11) > max_width:
+                pdf.drawString(margin_x, y_current, current)
+                y_current -= 16
+                current = word
+            else:
+                current = test
+        pdf.drawString(margin_x, y_current, current)
+        return y_current - 16
+
+    y = height - margin_y
+    pdf.setFont("Helvetica", 11)
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        if y < margin_y:
+            pdf.showPage()
+            pdf.setFont("Helvetica", 11)
+            y = height - margin_y
+        if not line:
+            y -= 12
+            continue
+        y = draw_wrapped_line(line, y)
+
+    pdf.save()
+    return buffer.getvalue()
+
+
 def _all_active_user_ids() -> list[str]:
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -3142,6 +3278,55 @@ def _extract_document_bytes(document: dict | None) -> bytes | None:
         return handle.read()
 
 
+def _load_latest_kurzuebersicht_stand() -> datetime | None:
+    document = _load_latest_document_record("kurzuebersicht")
+    if not document:
+        return None
+
+    title = document.get("title") or ""
+    title_match = re.search(r"Stand\s+(\d{2})-([A-Za-z]{3})\s+(\d{2})Uhr", title)
+    if title_match:
+        month_map = {
+            "Jan": 1,
+            "Feb": 2,
+            "Mrz": 3,
+            "Apr": 4,
+            "Mai": 5,
+            "Jun": 6,
+            "Jul": 7,
+            "Aug": 8,
+            "Sep": 9,
+            "Okt": 10,
+            "Nov": 11,
+            "Dez": 12,
+        }
+        month = month_map.get(title_match.group(2))
+        created_at = document.get("created_at")
+        if month and created_at:
+            created_dt = _parse_iso_datetime(created_at)
+            if created_dt is not None:
+                return datetime(
+                    created_dt.year,
+                    month,
+                    int(title_match.group(1)),
+                    int(title_match.group(3)),
+                    0,
+                    tzinfo=EUROPE_BERLIN,
+                )
+
+    document_bytes = _extract_document_bytes(document)
+    if not document_bytes:
+        return None
+
+    try:
+        first_page = _extract_pdf_page_texts(document_bytes)[0]
+    except Exception:
+        return None
+
+    metadata = _extract_kurzuebersicht_header_metadata(first_page)
+    return metadata["stand"] if metadata else None
+
+
 def _attachment_already_imported(
     *,
     mailbox_uid: str,
@@ -3152,7 +3337,7 @@ def _attachment_already_imported(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT 1
+                SELECT document_id
                 FROM mail_import_events
                 WHERE mailbox_uid = %s
                   AND attachment_name = %s
@@ -3161,7 +3346,16 @@ def _attachment_already_imported(
                 """,
                 (mailbox_uid, attachment_name, attachment_category),
             )
-            return cur.fetchone() is not None
+            row = cur.fetchone()
+
+    if row is None:
+        return False
+
+    if row[0] is None and attachment_category == "kurzuebersicht":
+        if _load_latest_document_record("kurzuebersicht") is None:
+            return False
+
+    return True
 
 
 def _record_mail_import_event(
@@ -3171,7 +3365,7 @@ def _record_mail_import_event(
     subject: str,
     attachment_name: str,
     attachment_category: str,
-    document_id: str,
+    document_id: str | None,
 ):
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -3198,6 +3392,88 @@ def _record_mail_import_event(
                 ),
             )
         conn.commit()
+
+
+def _prepare_kurzuebersicht_pdf(payload: bytes) -> dict | None:
+    page_texts = _extract_pdf_page_texts(payload)
+    if not page_texts:
+        return None
+
+    metadata = _extract_kurzuebersicht_header_metadata(page_texts[0])
+    if not metadata:
+        return None
+
+    reader = PdfReader(BytesIO(payload))
+    writer = PdfWriter()
+    for index, page_text in enumerate(page_texts):
+        normalized = page_text.replace("\u00a0", " ")
+        if index > 0 and re.search(r"(^|\n)\s*Tagesordnung\s*(\n|$)", normalized, flags=re.IGNORECASE):
+            break
+        writer.add_page(reader.pages[index])
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    pdf_bytes = buffer.getvalue()
+    stand = metadata["stand"]
+    title = _format_kurzuebersicht_title(stand)
+    return {
+        "category": "kurzuebersicht",
+        "title": title,
+        "filename": f"{title}.pdf",
+        "mime_type": "application/pdf",
+        "content_bytes": pdf_bytes,
+        "stand": stand,
+    }
+
+
+def _prepare_kurzuebersicht_docx(payload: bytes) -> dict | None:
+    text = _extract_docx_text(payload)
+    if not text:
+        return None
+
+    metadata = _extract_kurzuebersicht_header_metadata(text)
+    if not metadata:
+        return None
+
+    cleaned_text = text
+    tagesordnung_match = re.search(r"(^|\n)Tagesordnung(\n|$)", cleaned_text, flags=re.IGNORECASE)
+    if tagesordnung_match:
+        cleaned_text = cleaned_text[:tagesordnung_match.start()].rstrip()
+
+    stand = metadata["stand"]
+    title = _format_kurzuebersicht_title(stand)
+    pdf_bytes = _render_text_as_pdf(cleaned_text)
+    return {
+        "category": "kurzuebersicht",
+        "title": title,
+        "filename": f"{title}.pdf",
+        "mime_type": "application/pdf",
+        "content_bytes": pdf_bytes,
+        "stand": stand,
+    }
+
+
+def _prepare_mail_attachment(subject: str, filename: str, payload: bytes, mime_type: str | None) -> dict | None:
+    lower_filename = (filename or "").lower()
+    lower_mime = (mime_type or "").lower()
+
+    candidate = None
+    try:
+        if lower_filename.endswith(".pdf") or lower_mime == "application/pdf":
+            candidate = _prepare_kurzuebersicht_pdf(payload)
+        elif lower_filename.endswith(".docx") or "officedocument.wordprocessingml.document" in lower_mime:
+            candidate = _prepare_kurzuebersicht_docx(payload)
+    except Exception as exc:
+        print(f"MAIL IMPORT PREP FAILED filename={filename} error={exc}", flush=True)
+        return None
+
+    if not candidate:
+        return None
+
+    latest_stand = _load_latest_kurzuebersicht_stand()
+    if latest_stand is not None and candidate["stand"] <= latest_stand:
+        candidate["skip_reason"] = "stand_not_newer"
+    return candidate
 
 
 def run_mail_import_once():
@@ -3253,14 +3529,19 @@ def run_mail_import_once():
                 if not filename:
                     continue
 
-                category = _classify_mail_attachment(subject, filename)
-                if not category:
+                lower_filename = filename.lower()
+                if not (
+                    lower_filename.endswith(".pdf")
+                    or lower_filename.endswith(".docx")
+                    or "kurz" in _normalize_text_key(subject)
+                    or "tagesordnung" in _normalize_text_key(subject)
+                ):
                     continue
 
                 if _attachment_already_imported(
                     mailbox_uid=mailbox_uid,
                     attachment_name=filename,
-                    attachment_category=category,
+                    attachment_category="kurzuebersicht",
                 ):
                     continue
 
@@ -3269,13 +3550,28 @@ def run_mail_import_once():
                     continue
 
                 mime_type = part.get_content_type() or "application/octet-stream"
-                title = _build_import_title(category, subject, filename)
+                prepared = _prepare_mail_attachment(subject, filename, payload, mime_type)
+                if not prepared:
+                    continue
+
+                if prepared.get("skip_reason") == "stand_not_newer":
+                    _record_mail_import_event(
+                        mailbox_uid=mailbox_uid,
+                        message_id=message_id,
+                        subject=subject,
+                        attachment_name=filename,
+                        attachment_category=prepared["category"],
+                        document_id=None,
+                    )
+                    continue
+
+                title = prepared["title"]
                 document_id = _persist_document_record(
                     title=title,
-                    category=category,
-                    original_filename=filename,
-                    mime_type=mime_type,
-                    content_bytes=payload,
+                    category=prepared["category"],
+                    original_filename=prepared["filename"],
+                    mime_type=prepared["mime_type"],
+                    content_bytes=prepared["content_bytes"],
                     recipient_ids=recipient_ids,
                     uploaded_by_user_id=None,
                 )
@@ -3284,7 +3580,7 @@ def run_mail_import_once():
                     message_id=message_id,
                     subject=subject,
                     attachment_name=filename,
-                    attachment_category=category,
+                    attachment_category=prepared["category"],
                     document_id=document_id,
                 )
                 _notify_new_document(
@@ -3294,10 +3590,11 @@ def run_mail_import_once():
                 imported.append(
                     {
                         "document_id": document_id,
-                        "category": category,
+                        "category": prepared["category"],
                         "title": title,
-                        "filename": filename,
+                        "filename": prepared["filename"],
                         "mailbox_uid": mailbox_uid,
+                        "stand": prepared["stand"].isoformat() if prepared.get("stand") else None,
                     }
                 )
 

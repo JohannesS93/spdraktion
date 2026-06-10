@@ -25,6 +25,7 @@ MAIL_IMPORT_IMAP_PORT=993
 MAIL_IMPORT_USERNAME=webmaster@spdfraktion-intern.de
 MAIL_IMPORT_PASSWORD=DEIN_PASSWORT
 MAIL_IMPORT_LOOKBACK_DAYS=14
+MAIL_IMPORT_POLL_MINUTES=5
 ```
 
 Als Vorlage liegt bereit:
@@ -33,11 +34,19 @@ Als Vorlage liegt bereit:
 
 ## Was importiert wird
 
-Der Import liest Mails aus dem Postfach und verarbeitet Anhänge nur dann, wenn Betreff oder Dateiname dazu passen:
+Der Import liest Mails aus dem Postfach und verarbeitet Anhänge nur dann, wenn der Inhalt wirklich eine Kurzübersicht ist.
 
-- `Kurzübersicht` -> Kategorie `kurzuebersicht`
-- `ausgezeichnete Tagesordnung` -> Kategorie `ausgezeichnete_tagesordnung`
-- `PGF ... Dienste` -> Kategorie `pgf_dienste`
+Aktuell gilt:
+
+- erste Seite bzw. Dokumentanfang muss mit `Kurzübersicht über Plenarthemen vom ...` arbeiten
+- darunter muss eine `Stand:`-Zeile stehen
+- importiert wird nur, wenn dieser `Stand` neuer ist als der zuletzt importierte KÜ-Stand
+- wenn eine Kombi-Datei auch die `Tagesordnung` enthält, wird dieser Teil vor dem Speichern abgeschnitten
+- liegt die KÜ als `docx` vor, wird sie für die App in ein PDF umgewandelt
+
+Der gespeicherte Dateiname folgt immer dem Schema:
+
+- `KÜ 24 Stand 10-Jun 11Uhr.pdf`
 
 Alle importierten Dokumente werden aktuell an **alle aktiven Nutzer** verteilt.
 
@@ -50,6 +59,9 @@ Damit derselbe Anhang nicht mehrfach angelegt wird, speichert das Backend pro:
 - Kategorie
 
 einen Import-Eintrag in `mail_import_events`.
+
+Zusätzlich wird bei Kurzübersichten der inhaltliche `Stand` geprüft.
+Ist der Stand nicht neuer, wird die Datei nicht noch einmal verteilt.
 
 ## Manuell testen
 
