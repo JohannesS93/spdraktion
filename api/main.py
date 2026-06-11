@@ -4308,15 +4308,17 @@ def _build_live_speaker_lookup(parliament_payload: dict | None) -> dict[tuple[st
         return {}
 
     live_topic_number = (speaker_payload.get("topic_number") or "").strip().upper()
+    normalized_live_topics = _normalize_parliament_top_labels(live_topic_number)
     lookup: dict[tuple[str, str], dict] = {}
     for speaker in speaker_payload.get("speakers") or []:
         speaker_name = (speaker.get("name") or "").strip()
         if not speaker_name:
             continue
 
-        topic_number = live_topic_number
-        key = (_normalize_text_key(speaker_name), topic_number)
-        lookup[key] = speaker
+        speaker_key = _normalize_text_key(speaker_name)
+        for topic_number in normalized_live_topics or [live_topic_number]:
+            key = (speaker_key, topic_number)
+            lookup[key] = speaker
 
     return lookup
 
