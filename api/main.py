@@ -3850,11 +3850,41 @@ def _build_latest_kurzuebersicht_payload() -> dict | None:
 
 
 def _normalize_parliament_top_labels(value: str | None) -> list[str]:
-    raw = (value or "").strip().upper()
+    raw = re.sub(r"\s+", " ", (value or "").strip().upper())
     if not raw:
         return []
-    normalized = raw.replace("TOP ", "").replace("ZP ", "ZP ")
-    return [part.strip() for part in normalized.split(",") if part.strip()]
+
+    labels: list[str] = []
+
+    def push_label(prefix: str | None, number: str) -> None:
+        labels.append(f"ZP {number}" if prefix == "ZP" else number)
+
+    for part in [item.strip() for item in raw.split(",") if item.strip()]:
+        range_match = re.match(r"^(TOP|ZP)?\s*(\d+)\s*[-–]\s*(\d+)$", part)
+        if range_match:
+            prefix = range_match.group(1)
+            start = int(range_match.group(2))
+            end = int(range_match.group(3))
+            if end >= start:
+                for current in range(start, end + 1):
+                    push_label(prefix, str(current))
+                continue
+
+        plus_match = re.match(r"^(TOP|ZP)?\s*(\d+)\+(\d+)$", part)
+        if plus_match:
+            prefix = plus_match.group(1)
+            push_label(prefix, plus_match.group(2))
+            push_label(prefix, plus_match.group(3))
+            continue
+
+        simple_match = re.match(r"^(TOP|ZP)?\s*(\d+[A-Z]?)$", part)
+        if simple_match:
+            push_label(simple_match.group(1), simple_match.group(2))
+            continue
+
+        labels.append(part.replace("TOP ", "").replace("ZP ", "ZP "))
+
+    return list(dict.fromkeys(labels))
 
 
 def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: dict | None) -> dict | None:

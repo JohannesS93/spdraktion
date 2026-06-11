@@ -151,11 +151,51 @@ function pointLabel(point?: ParliamentPoint | RollCall | null) {
 function normalizeTopLabels(value?: string | null) {
   const raw = (value ?? "").trim().toUpperCase();
   if (!raw) return [];
-  const normalized = raw.replace(/\bTOP\s+/g, "").replace(/\bZP\s+/g, "ZP ");
-  return normalized
+
+  const parts = raw
+    .replace(/\s+/g, " ")
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+
+  const labels: string[] = [];
+
+  const pushLabel = (prefix: string | null, number: string) => {
+    labels.push(prefix === "ZP" ? `ZP ${number}` : number);
+  };
+
+  for (const part of parts) {
+    const rangeMatch = part.match(/^(TOP|ZP)?\s*(\d+)\s*[-–]\s*(\d+)$/);
+    if (rangeMatch) {
+      const prefix = rangeMatch[1] ?? null;
+      const start = Number(rangeMatch[2]);
+      const end = Number(rangeMatch[3]);
+      if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+        for (let current = start; current <= end; current += 1) {
+          pushLabel(prefix, String(current));
+        }
+        continue;
+      }
+    }
+
+    const plusMatch = part.match(/^(TOP|ZP)?\s*(\d+)\+(\d+)$/);
+    if (plusMatch) {
+      const prefix = plusMatch[1] ?? null;
+      pushLabel(prefix, plusMatch[2]);
+      pushLabel(prefix, plusMatch[3]);
+      continue;
+    }
+
+    const simpleMatch = part.match(/^(TOP|ZP)?\s*(\d+[A-Z]?)$/);
+    if (simpleMatch) {
+      pushLabel(simpleMatch[1] ?? null, simpleMatch[2]);
+      continue;
+    }
+
+    labels.push(part.replace(/\bTOP\s+/g, "").replace(/\bZP\s+/g, "ZP "));
+  }
+
+  return Array.from(new Set(labels));
 }
 
 function startOfWeek(date: Date) {
@@ -479,22 +519,25 @@ export default function InformationenPage() {
           <CardContent>
             <div className="space-y-3">
               {(agendaInfo?.agenda_points ?? []).map((point, index) => {
+                const topKeys = normalizeTopLabels(point.top);
+                const currentTopKeys = normalizeTopLabels(info?.current_top?.top);
+                const nextTopKeys = normalizeTopLabels(info?.next_top?.top);
                 const isCurrent =
                   isAgendaLiveDay &&
-                  point.top === info?.current_top?.top &&
-                  point.start_at === info?.current_top?.start_at;
+                  topKeys.length > 0 &&
+                  topKeys.some((key) => currentTopKeys.includes(key));
                 const isNext =
                   isAgendaLiveDay &&
-                  point.top === info?.next_top?.top &&
-                  point.start_at === info?.next_top?.start_at;
-                const topKeys = normalizeTopLabels(point.top);
+                  topKeys.length > 0 &&
+                  topKeys.some((key) => nextTopKeys.includes(key));
                 const pointDate = isoDatePart(point.start_at);
                 const speakers = Array.from(
                   new Map(
                     topKeys
                       .flatMap((key) =>
                         (speakersByTop.get(key) ?? []).filter(
-                          (speaker) => isoDatePart(speaker.planned_start_at) === pointDate,
+                          (speaker) =>
+                            isoDatePart(speaker.effective_start_at || speaker.planned_start_at) === pointDate,
                         ),
                       )
                       .map((speaker) => {
