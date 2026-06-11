@@ -209,6 +209,53 @@ function normalizeTopLabels(value?: string | null) {
   return Array.from(new Set(labels));
 }
 
+function topNumberOnly(label: string) {
+  return label.replace(/^ZP\s+/i, "").trim();
+}
+
+function sameTopNumberSequence(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  return left.map(topNumberOnly).join("|") === right.map(topNumberOnly).join("|");
+}
+
+function topSetsIntersect(left: string[], right: string[]) {
+  return left.some((item) => right.includes(item));
+}
+
+function speechMatchesPoint(pointLabels: string[], speechLabels: string[]) {
+  if (!pointLabels.length || !speechLabels.length) return false;
+  if (sameTopNumberSequence(pointLabels, speechLabels)) return true;
+  if (pointLabels.length === 1 || speechLabels.length === 1) {
+    return topSetsIntersect(pointLabels, speechLabels);
+  }
+  return false;
+}
+
+function deriveDisplayTop(pointLabels: string[], speakers: FactionSpeech[]) {
+  const counts = new Map<string, { labels: string[]; count: number }>();
+  speakers.forEach((speaker) => {
+    const labels = [
+      ...(speaker.top_labels ?? []),
+      ...(speaker.top ? [speaker.top] : []),
+    ].flatMap((value) => normalizeTopLabels(value));
+    if (!labels.length) return;
+    const key = labels.join("|");
+    const current = counts.get(key);
+    if (current) {
+      current.count += 1;
+      return;
+    }
+    counts.set(key, { labels, count: 1 });
+  });
+
+  const ranked = Array.from(counts.values()).sort((a, b) => b.count - a.count);
+  const best = ranked[0];
+  if (best && sameTopNumberSequence(pointLabels, best.labels)) {
+    return best.labels.join(", ");
+  }
+  return pointLabels.join(", ");
+}
+
 function startOfWeek(date: Date) {
   const copy = new Date(date);
   copy.setHours(0, 0, 0, 0);
@@ -584,13 +631,17 @@ export default function InformationenPage() {
                 const pointDate = isoDatePart(point.start_at);
                 const speakers = Array.from(
                   new Map(
-                    topKeys
-                      .flatMap((key) =>
-                        (speakersByTop.get(key) ?? []).filter(
-                          (speaker) =>
-                            isoDatePart(speaker.effective_start_at || speaker.planned_start_at) === pointDate,
-                        ),
-                      )
+                    factionSpeeches
+                      .filter((speaker) => {
+                        const speechLabels = [
+                          ...(speaker.top_labels ?? []),
+                          ...(speaker.top ? [speaker.top] : []),
+                        ].flatMap((value) => normalizeTopLabels(value));
+                        return (
+                          isoDatePart(speaker.effective_start_at || speaker.planned_start_at) === pointDate &&
+                          speechMatchesPoint(topKeys, speechLabels)
+                        );
+                      })
                       .map((speaker) => {
                         const displayName = (speaker.source_speaker_name || speaker.speaker_name || "Unbekannt").trim();
                         return [
@@ -615,6 +666,7 @@ export default function InformationenPage() {
                     sensitivity: "base",
                   });
                 });
+                const displayTop = topKeys.length ? deriveDisplayTop(topKeys, speakers) : point.top || "Ohne TOP";
                 const topKey = topKeys.join("|");
                 const isSelected = selectedTop === topKey;
 
@@ -634,7 +686,7 @@ export default function InformationenPage() {
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="text-xs uppercase tracking-[0.24em] text-slate-500">
-                              {point.top || "Ohne TOP"}
+                              {displayTop || "Ohne TOP"}
                             </span>
                             {isCurrent ? (
                               <Badge className="rounded-full bg-slate-900 hover:bg-slate-900">Aktuell</Badge>
