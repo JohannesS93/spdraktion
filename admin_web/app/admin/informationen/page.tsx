@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
-import { CalendarClock, Clock3, Radio, RefreshCw, Timer } from "lucide-react";
+import { CalendarClock, CheckCircle2, ChevronDown, ChevronUp, Clock3, Radio, RefreshCw, Timer } from "lucide-react";
 
 import { AdminShell } from "@/components/admin-shell";
 import { Badge } from "@/components/ui/badge";
@@ -146,6 +146,17 @@ function pointLabel(point?: ParliamentPoint | RollCall | null) {
   const title = (point.title ?? "").toString().trim();
   if (top && title) return `${top} · ${title}`;
   return top || title || "—";
+}
+
+function formatShortDate(value?: string | null) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("de-DE", {
+    weekday: "short",
+    day: "2-digit",
+    month: "2-digit",
+  }).format(date);
 }
 
 function normalizeTopLabels(value?: string | null) {
@@ -336,6 +347,17 @@ export default function InformationenPage() {
     return <Badge variant="outline" className="rounded-full">Keine laufende Sitzung</Badge>;
   }, [info]);
 
+  const groupedWeeklyRollCalls = useMemo(() => {
+    const groups = new Map<string, RollCall[]>();
+    (info?.weekly_roll_calls ?? []).forEach((rollCall) => {
+      const key = isoDatePart(rollCall.end_at || rollCall.start_at) ?? "unbekannt";
+      const existing = groups.get(key) ?? [];
+      existing.push(rollCall);
+      groups.set(key, existing);
+    });
+    return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [info]);
+
   const speakersByTop = useMemo(() => {
     const grouped = new Map<string, FactionSpeech[]>();
     factionSpeeches.forEach((speech) => {
@@ -365,6 +387,11 @@ export default function InformationenPage() {
     });
   }, [info, selectedSessionDate]);
 
+  const selectedDayLabel = useMemo(() => {
+    const selectedDay = visibleSessionDays.find((day) => day.date === selectedSessionDate);
+    return selectedDay?.date_text || selectedSessionDate || "Sitzungstag";
+  }, [selectedSessionDate, visibleSessionDays]);
+
   const isAgendaLiveDay = Boolean(
     selectedSessionDate &&
       info?.current_session?.date &&
@@ -378,7 +405,7 @@ export default function InformationenPage() {
   return (
     <AdminShell
       title="Informationen"
-      subtitle="Aktuelle Informationen aus Sitzung, Agenda und Rednerfolge."
+      subtitle="Sitzungsverlauf, Rednerfolge und namentliche Abstimmungen auf einen Blick."
       session={session}
       actions={
         <Button
@@ -392,7 +419,7 @@ export default function InformationenPage() {
         </Button>
       }
     >
-      <div className="space-y-6 p-6">
+      <div className="space-y-6">
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-3">
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -448,28 +475,48 @@ export default function InformationenPage() {
 
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-2">
-            <CardTitle className="text-lg">Namentliche Abstimmungen diese Woche</CardTitle>
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <CardTitle className="text-lg">Namentliche Abstimmungen diese Woche</CardTitle>
+              <div className="text-sm text-slate-500">
+                {(info?.weekly_roll_calls?.length ?? 0) > 0
+                  ? `${info?.weekly_roll_calls?.length ?? 0} erkannte Abstimmungen`
+                  : "Noch keine Abstimmung erkannt"}
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
             {(info?.weekly_roll_calls?.length ?? 0) > 0 ? (
-              <div className="space-y-3">
-                {info?.weekly_roll_calls?.map((rollCall, index) => (
-                  <div
-                    key={`${rollCall.top ?? "roll-call"}-${rollCall.end_at ?? rollCall.start_at ?? index}`}
-                    className="border border-slate-200 bg-slate-50 px-4 py-3"
-                  >
-                    <div className="text-xs uppercase tracking-[0.24em] text-slate-500">
-                      {rollCall.top || "Namentliche Abstimmung"}
+              <div className="space-y-4">
+                {groupedWeeklyRollCalls.map(([day, items]) => (
+                  <div key={day} className="border border-slate-200 bg-slate-50">
+                    <div className="border-b border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700">
+                      {formatShortDate(`${day}T12:00:00+02:00`)}
                     </div>
-                    <div className="mt-1 font-medium text-slate-900">
-                      {rollCall.title || "Namentliche Abstimmung"}
+                    <div className="divide-y divide-slate-200">
+                      {items.map((rollCall, index) => (
+                        <div
+                          key={`${rollCall.top ?? "roll-call"}-${rollCall.end_at ?? rollCall.start_at ?? index}`}
+                          className="px-4 py-3"
+                        >
+                          <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-xs uppercase tracking-[0.18em] text-slate-500">
+                                {rollCall.top || "Namentliche Abstimmung"}
+                              </div>
+                              <div className="mt-1 font-medium text-slate-900">
+                                {rollCall.title || "Namentliche Abstimmung"}
+                              </div>
+                              {rollCall.schedule_note ? (
+                                <div className="mt-2 text-sm text-slate-500">{rollCall.schedule_note}</div>
+                              ) : null}
+                            </div>
+                            <div className="shrink-0 text-sm font-medium text-slate-700">
+                              {formatTime(rollCall.end_at || rollCall.start_at)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div className="mt-2 text-sm text-slate-500">
-                      {formatDateTime(rollCall.end_at || rollCall.start_at)}
-                    </div>
-                    {rollCall.schedule_note ? (
-                      <div className="mt-2 text-sm text-slate-500">{rollCall.schedule_note}</div>
-                    ) : null}
                   </div>
                 ))}
               </div>
@@ -491,7 +538,13 @@ export default function InformationenPage() {
 
         <Card className="rounded-none border-slate-200">
           <CardHeader className="pb-2">
-            <CardTitle className="text-xl">Aktuelle Sitzungsagenda</CardTitle>
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+              <CardTitle className="text-xl">Sitzungsagenda</CardTitle>
+              <div className="text-sm text-slate-500">
+                {selectedDayLabel}
+                {isAgendaLiveDay ? " · mit Live-Abgleich" : ""}
+              </div>
+            </div>
             {visibleSessionDays.length > 0 ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 {visibleSessionDays.map((day) => {
@@ -570,7 +623,11 @@ export default function InformationenPage() {
                     key={`${point.top ?? "no-top"}-${point.start_at ?? index}`}
                     type="button"
                     onClick={() => setSelectedTop(isSelected ? null : topKey)}
-                    className="w-full border border-slate-200 bg-white px-4 py-3 text-left transition hover:border-slate-300 hover:bg-slate-50"
+                    className={`w-full border px-4 py-3 text-left transition ${
+                      isSelected
+                        ? "border-slate-900 bg-slate-50"
+                        : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"
+                    }`}
                   >
                     <div className="flex flex-col gap-3">
                       <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
@@ -591,13 +648,21 @@ export default function InformationenPage() {
                           </div>
                           <div className="mt-1 font-medium text-slate-900">{point.title || "Ohne Titel"}</div>
                         </div>
-                        <div className="shrink-0 text-sm text-slate-500">
-                          {formatTime(point.start_at)} – {formatTime(point.end_at)}
+                        <div className="flex items-center gap-3 self-start md:self-auto">
+                          <div className="shrink-0 text-sm text-slate-500">
+                            {formatTime(point.start_at)} – {formatTime(point.end_at)}
+                          </div>
+                          {isSelected ? (
+                            <ChevronUp className="h-4 w-4 text-slate-400" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4 text-slate-400" />
+                          )}
                         </div>
                       </div>
                       {isSelected ? (
                         <div className="border-t border-slate-200 pt-3">
-                          <div className="text-xs uppercase tracking-[0.24em] text-slate-500">
+                          <div className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                            <CheckCircle2 className="h-4 w-4" />
                             Redner zu diesem TOP
                           </div>
                           {speakers.length ? (
@@ -613,6 +678,10 @@ export default function InformationenPage() {
                                   {isAgendaLiveDay && speaker.has_live_time ? (
                                     <div className="mt-1 text-sm text-slate-500">
                                       Live-Zeit: {formatTime(speaker.effective_start_at)}
+                                    </div>
+                                  ) : speaker.planned_start_at ? (
+                                    <div className="mt-1 text-sm text-slate-500">
+                                      Geplant im TOP ab {formatTime(speaker.planned_start_at)}
                                     </div>
                                   ) : null}
                                 </div>
@@ -659,7 +728,7 @@ function InfoMetric({
         <Icon className="h-4 w-4" />
         <span>{label}</span>
       </div>
-      <div className="mt-3 text-sm font-medium text-slate-900">{value}</div>
+      <div className="mt-3 text-sm font-medium leading-6 text-slate-900">{value}</div>
     </div>
   );
 }
@@ -686,7 +755,7 @@ function InfoCard({
             </div>
             <div className="text-base font-semibold text-slate-900">{point.title || "Ohne Titel"}</div>
             <div className="text-sm text-slate-500">
-              {formatDateTime(point.start_at)} bis {formatTime(point.end_at)}
+              {formatDateTime(point.start_at)}{point.end_at ? ` bis ${formatTime(point.end_at)}` : ""}
             </div>
           </div>
         ) : (
@@ -711,7 +780,7 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
             </div>
             <div className="text-base font-semibold text-slate-900">{pointLabel(rollCall)}</div>
             <div className="text-sm text-slate-500">
-              {formatDateTime(rollCall.end_at || rollCall.start_at)}
+              Maßgeblich: {formatDateTime(rollCall.end_at || rollCall.start_at)}
             </div>
             {rollCall.duration_minutes || rollCall.location ? (
               <div className="text-sm text-slate-500">
@@ -723,16 +792,18 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
             {rollCall.schedule_note ? (
               <div className="text-sm text-slate-500">{rollCall.schedule_note}</div>
             ) : null}
-            {rollCall.source_url ? (
+            {rollCall.source_url || rollCall.pdf_url ? (
               <div className="flex flex-wrap gap-4">
-                <a
-                  href={rollCall.source_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex text-sm font-medium text-[#E3000F] hover:underline"
-                >
-                  Offiziellen Bundestag-Artikel öffnen
-                </a>
+                {rollCall.source_url ? (
+                  <a
+                    href={rollCall.source_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex text-sm font-medium text-[#E3000F] hover:underline"
+                  >
+                    Offiziellen Bundestag-Artikel öffnen
+                  </a>
+                ) : null}
                 {rollCall.pdf_url ? (
                   <a
                     href={rollCall.pdf_url}
@@ -740,7 +811,7 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
                     rel="noreferrer"
                     className="inline-flex text-sm font-medium text-[#E3000F] hover:underline"
                   >
-                    Ablaufplan öffnen
+                    Quelle öffnen
                   </a>
                 ) : null}
               </div>

@@ -56,6 +56,8 @@ export default function FeedbackAdminPage() {
   const [entries, setEntries] = useState<FeedbackEntry[]>([]);
   const [error, setError] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [kindFilter, setKindFilter] = useState<string>("all");
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
@@ -162,6 +164,19 @@ export default function FeedbackAdminPage() {
     return name || user.email;
   }
 
+  const filteredEntries = entries.filter((entry) => {
+    const statusMatches = statusFilter === "all" || entry.status === statusFilter;
+    const kindMatches = kindFilter === "all" || entry.kind === kindFilter;
+    return statusMatches && kindMatches;
+  });
+
+  const summary = {
+    total: entries.length,
+    open: entries.filter((entry) => entry.status === "open").length,
+    review: entries.filter((entry) => entry.status === "in_review").length,
+    errors: entries.filter((entry) => entry.kind === "error").length,
+  };
+
   if (!authReady) {
     return <div className="p-6">Lade…</div>;
   }
@@ -180,19 +195,78 @@ export default function FeedbackAdminPage() {
         </Button>
       }
     >
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <Card className="admin-card">
+          <CardContent className="p-4">
+            <div className="admin-stat-label">Gesamt</div>
+            <div className="admin-stat-value">{summary.total}</div>
+          </CardContent>
+        </Card>
+        <Card className="admin-card">
+          <CardContent className="p-4">
+            <div className="admin-stat-label">Offen</div>
+            <div className="admin-stat-value">{summary.open}</div>
+          </CardContent>
+        </Card>
+        <Card className="admin-card">
+          <CardContent className="p-4">
+            <div className="admin-stat-label">In Prüfung</div>
+            <div className="admin-stat-value">{summary.review}</div>
+          </CardContent>
+        </Card>
+        <Card className="admin-card">
+          <CardContent className="p-4">
+            <div className="admin-stat-label">Fehler</div>
+            <div className="admin-stat-value">{summary.errors}</div>
+          </CardContent>
+        </Card>
+      </div>
+
       <Card className="admin-card">
         <CardHeader className="admin-card-header">
           <CardTitle>Eingegangene Rückmeldungen</CardTitle>
         </CardHeader>
         <CardContent className="admin-section">
           {error ? <div className="admin-error">{error}</div> : null}
+          <div className="grid gap-3 md:grid-cols-2 xl:max-w-2xl">
+            <div>
+              <div className="mb-1 text-sm font-medium text-slate-700">Status</div>
+              <Select value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectTrigger className="admin-select-trigger">
+                  <SelectValue placeholder="Alle Status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Alle Status</SelectItem>
+                  {STATUS_OPTIONS.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <div className="mb-1 text-sm font-medium text-slate-700">Art</div>
+              <Select value={kindFilter} onValueChange={setKindFilter}>
+                <SelectTrigger className="admin-select-trigger">
+                  <SelectValue placeholder="Alle Arten" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Alle Arten</SelectItem>
+                  <SelectItem value="error">Fehler</SelectItem>
+                  <SelectItem value="improvement">Verbesserung</SelectItem>
+                  <SelectItem value="general">Allgemein</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
           {loading ? (
             <div className="text-sm text-slate-500">Rückmeldungen werden geladen…</div>
-          ) : entries.length === 0 ? (
+          ) : filteredEntries.length === 0 ? (
             <div className="text-sm text-slate-500">Noch keine Rückmeldungen vorhanden.</div>
           ) : (
             <div className="space-y-4">
-              {entries.map((entry) => (
+              {filteredEntries.map((entry) => (
                 <div key={entry.id} className="rounded border border-slate-200 bg-white p-4">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     <div className="min-w-0">

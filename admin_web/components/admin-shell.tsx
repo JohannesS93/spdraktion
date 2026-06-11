@@ -14,10 +14,12 @@ import {
   Lightbulb,
   Info,
   LogOut,
+  Menu,
   MessageSquare,
   Pencil,
   Settings,
   Shield,
+  X,
   UserCog,
   Users,
 } from "lucide-react";
@@ -105,6 +107,7 @@ export function AdminShell({
   const canSendPush = session.role === "admin" || session.role === "pgf";
   const [pushSending, setPushSending] = useState(false);
   const [pushStatus, setPushStatus] = useState<string | null>(null);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   async function logout() {
     clearSession();
@@ -154,10 +157,51 @@ export function AdminShell({
     }
   }
 
+  function renderNavItems(closeAfterClick = false) {
+    return nav.map((item) => {
+      const Icon = item.icon;
+      const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+      const classes = [
+        "flex items-center gap-3 border-l-2 px-3 py-2.5 text-sm transition-colors",
+        item.disabled
+          ? "cursor-not-allowed border-l-transparent text-slate-400"
+          : active
+            ? "border-l-[#E3000F] bg-slate-50 text-slate-950"
+            : "border-l-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-900",
+      ].join(" ");
+
+      if (item.disabled) {
+        return (
+          <div key={item.href} className={classes} title={item.disabledHint}>
+            <Icon className="h-4 w-4" />
+            <span>{item.label}</span>
+            {item.disabledHint ? (
+              <span className="ml-auto text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                {item.disabledHint}
+              </span>
+            ) : null}
+          </div>
+        );
+      }
+
+      return (
+        <Link
+          key={item.href}
+          href={item.href}
+          className={classes}
+          onClick={closeAfterClick ? () => setMobileNavOpen(false) : undefined}
+        >
+          <Icon className="h-4 w-4" />
+          <span>{item.label}</span>
+        </Link>
+      );
+    });
+  }
+
   return (
     <div className="min-h-screen bg-[#f7f7f8] text-slate-900">
       <div className="flex min-h-screen">
-        <aside className="w-[220px] shrink-0 border-r border-slate-200 bg-white">
+        <aside className="hidden w-[220px] shrink-0 border-r border-slate-200 bg-white lg:block">
           <div className="flex h-full flex-col">
             <div className="border-b border-slate-200 px-5 py-4">
               <Link href="/backend" className="flex items-center gap-3">
@@ -173,41 +217,7 @@ export function AdminShell({
             </div>
 
             <nav className="flex-1 p-3">
-              <div className="space-y-1">
-                {nav.map((item) => {
-                  const Icon = item.icon;
-                  const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-                  const classes = [
-                    "flex items-center gap-3 border-l-2 px-3 py-2.5 text-sm transition-colors",
-                    item.disabled
-                      ? "cursor-not-allowed border-l-transparent text-slate-400"
-                      : active
-                        ? "border-l-[#E3000F] bg-slate-50 text-slate-950"
-                        : "border-l-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-900",
-                  ].join(" ");
-
-                  if (item.disabled) {
-                    return (
-                      <div key={item.href} className={classes} title={item.disabledHint}>
-                        <Icon className="h-4 w-4" />
-                        <span>{item.label}</span>
-                        {item.disabledHint ? (
-                          <span className="ml-auto text-[11px] uppercase tracking-[0.18em] text-slate-400">
-                            {item.disabledHint}
-                          </span>
-                        ) : null}
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <Link key={item.href} href={item.href} className={classes}>
-                      <Icon className="h-4 w-4" />
-                      <span>{item.label}</span>
-                    </Link>
-                  );
-                })}
-              </div>
+              <div className="space-y-1">{renderNavItems()}</div>
             </nav>
 
             <div className="border-t border-slate-200 p-3">
@@ -263,9 +273,18 @@ export function AdminShell({
         </aside>
 
         <main className="min-w-0 flex-1">
-          <div className="relative z-10 border-b border-slate-200 bg-white px-6 py-5">
+          <div className="relative z-10 border-b border-slate-200 bg-white px-4 py-4 sm:px-6 sm:py-5">
             <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
               <div className="flex min-w-0 flex-1 items-start gap-4">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="rounded-none lg:hidden"
+                  onClick={() => setMobileNavOpen(true)}
+                >
+                  <Menu className="h-4 w-4" />
+                  <span className="sr-only">Navigation öffnen</span>
+                </Button>
                 <Image
                   src="/spd-logo.png"
                   alt="SPD"
@@ -289,11 +308,100 @@ export function AdminShell({
             </div>
           </div>
 
-          <div className="p-6">
+          <div className="p-4 sm:p-6">
             <div className="space-y-6">{children}</div>
           </div>
         </main>
       </div>
+
+      {mobileNavOpen ? (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-slate-950/35"
+            onClick={() => setMobileNavOpen(false)}
+          />
+          <div className="absolute inset-y-0 left-0 flex w-[88vw] max-w-[320px] flex-col border-r border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+              <Link
+                href="/backend"
+                className="flex items-center gap-3"
+                onClick={() => setMobileNavOpen(false)}
+              >
+                <Image
+                  src="/spd-logo.png"
+                  alt="SPD"
+                  width={80}
+                  height={20}
+                  className="h-5 w-auto object-contain opacity-90"
+                />
+                <div className="text-sm font-medium text-slate-900">Fraktion Intern</div>
+              </Link>
+              <Button
+                type="button"
+                variant="outline"
+                className="rounded-none"
+                onClick={() => setMobileNavOpen(false)}
+              >
+                <X className="h-4 w-4" />
+                <span className="sr-only">Navigation schließen</span>
+              </Button>
+            </div>
+
+            <nav className="flex-1 overflow-y-auto p-3">
+              <div className="space-y-1">{renderNavItems(true)}</div>
+            </nav>
+
+            <div className="border-t border-slate-200 p-3">
+              <div className="mb-3 px-1">
+                <div className="text-sm font-medium">
+                  {session.first_name} {session.last_name}
+                </div>
+                <div className="mt-1 break-all text-xs text-slate-500">{session.email}</div>
+              </div>
+
+              {canSendPush ? (
+                <div className="mb-2">
+                  <Button
+                    variant="outline"
+                    className="w-full justify-start rounded-none"
+                    onClick={sendTestPush}
+                    disabled={pushSending}
+                  >
+                    <Bell className="mr-2 h-4 w-4" />
+                    {pushSending ? "Sende Test-Push…" : "Test-Push senden"}
+                  </Button>
+                  {pushStatus ? (
+                    <div className="mt-1 px-1 text-xs text-slate-500">{pushStatus}</div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <Link
+                href="/datenschutz"
+                target="_blank"
+                className="mb-2 block"
+                rel="noreferrer"
+                onClick={() => setMobileNavOpen(false)}
+              >
+                <Button variant="outline" className="w-full justify-start rounded-none">
+                  <Shield className="mr-2 h-4 w-4" />
+                  Datenschutz
+                </Button>
+              </Link>
+
+              <Button
+                variant="outline"
+                className="w-full justify-start rounded-none"
+                onClick={logout}
+              >
+                <LogOut className="mr-2 h-4 w-4" />
+                Logout
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
