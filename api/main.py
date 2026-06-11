@@ -3849,14 +3849,22 @@ def _build_latest_kurzuebersicht_payload() -> dict | None:
     }
 
 
+def _normalize_parliament_top_labels(value: str | None) -> list[str]:
+    raw = (value or "").strip().upper()
+    if not raw:
+        return []
+    normalized = raw.replace("TOP ", "").replace("ZP ", "ZP ")
+    return [part.strip() for part in normalized.split(",") if part.strip()]
+
+
 def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: dict | None) -> dict | None:
     if not parliament_payload:
         return None
 
     top_labels = {
-        (label or "").strip().upper()
+        normalized
         for label in (entry.get("top_labels") or [])
-        if (label or "").strip()
+        for normalized in _normalize_parliament_top_labels(label)
     }
     if not top_labels:
         return None
@@ -3869,26 +3877,18 @@ def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: 
     candidates.extend(parliament_payload.get("agenda_points") or [])
 
     for point in candidates:
-        point_top = (point.get("top") or "").strip().upper()
-        if point_top and point_top in top_labels:
+        point_labels = set(_normalize_parliament_top_labels(point.get("top")))
+        if point_labels & top_labels:
             return point
 
     return None
 
 
-def _normalize_parliament_top_labels(value: str | None) -> list[str]:
-    raw = (value or "").strip().upper()
-    if not raw:
-        return []
-    normalized = raw.replace("TOP ", "").replace("ZP ", "ZP ")
-    return [part.strip() for part in normalized.split(",") if part.strip()]
-
-
 def _find_session_point_for_kurzuebersicht_entry(entry: dict, sessions: list[dict]) -> dict | None:
     top_labels = {
-        (label or "").strip().upper()
+        normalized
         for label in (entry.get("top_labels") or [])
-        if (label or "").strip()
+        for normalized in _normalize_parliament_top_labels(label)
     }
     entry_date = entry.get("date")
     if not top_labels or not entry_date:
@@ -4021,17 +4021,23 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
     if not latest_payload:
         return []
 
+    sessions = _parse_bundestag_conferences()
     live_speaker_lookup = _build_live_speaker_lookup(parliament_payload)
     speeches: list[dict] = []
     for entry in latest_payload["entries"]:
+        session_point = _find_session_point_for_kurzuebersicht_entry(entry, sessions)
         live_point = _match_live_point_for_kurzuebersicht_entry(entry, parliament_payload)
-        effective_start_at = (live_point or {}).get("start_at") or entry.get("start_at")
+        effective_start_at = (
+            (live_point or {}).get("start_at")
+            or (session_point or {}).get("start_at")
+            or entry.get("start_at")
+        )
         top_labels = entry.get("top_labels") or []
         primary_top_label = (top_labels[0] if top_labels else None) or ""
         normalized_top_candidates = {
-            label.strip().upper()
+            normalized
             for label in top_labels
-            if (label or "").strip()
+            for normalized in _normalize_parliament_top_labels(label)
         }
         for speaker in entry.get("matched_speakers") or []:
             live_speaker = None
@@ -4112,13 +4118,13 @@ def _build_next_speech_for_user(
             continue
 
         top_labels = {
-            (label or "").strip().upper()
+            normalized
             for label in (speech.get("top_labels") or [])
-            if (label or "").strip()
+            for normalized in _normalize_parliament_top_labels(label)
         }
         current_top = (parliament_payload or {}).get("current_top") or {}
-        current_top_label = (current_top.get("top") or "").strip().upper()
-        if current_top_label and current_top_label in top_labels:
+        current_top_labels = set(_normalize_parliament_top_labels(current_top.get("top")))
+        if current_top_labels and current_top_labels & top_labels:
             current_candidate = speech
             break
 
