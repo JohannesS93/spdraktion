@@ -223,10 +223,11 @@ function topSetsIntersect(left: string[], right: string[]) {
 }
 
 function speechMatchesPoint(pointLabels: string[], speechLabels: string[]) {
+  const normalizedSpeechLabels = Array.from(new Set(speechLabels));
   if (!pointLabels.length || !speechLabels.length) return false;
-  if (sameTopNumberSequence(pointLabels, speechLabels)) return true;
-  if (pointLabels.length === 1 || speechLabels.length === 1) {
-    return topSetsIntersect(pointLabels, speechLabels);
+  if (sameTopNumberSequence(pointLabels, normalizedSpeechLabels)) return true;
+  if (pointLabels.length === 1 || normalizedSpeechLabels.length === 1) {
+    return topSetsIntersect(pointLabels, normalizedSpeechLabels);
   }
   return false;
 }
