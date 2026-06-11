@@ -4072,10 +4072,15 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
     for entry in latest_payload["entries"]:
         session_point = _find_session_point_for_kurzuebersicht_entry(entry, sessions)
         live_point = _match_live_point_for_kurzuebersicht_entry(entry, parliament_payload)
-        effective_start_at = (
+        effective_start_value = (
             (live_point or {}).get("start_at")
             or (session_point or {}).get("start_at")
             or entry.get("start_at")
+        )
+        effective_start_at = (
+            _iso_or_none(effective_start_value)
+            if isinstance(effective_start_value, datetime)
+            else effective_start_value
         )
         top_labels = entry.get("top_labels") or []
         primary_top_label = (top_labels[0] if top_labels else None) or ""
@@ -4137,7 +4142,13 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
                 }
             )
 
-    speeches.sort(key=lambda item: item.get("effective_start_at") or item.get("planned_start_at") or "")
+    speeches.sort(
+        key=lambda item: (
+            item.get("effective_start_at")
+            or item.get("planned_start_at")
+            or ""
+        )
+    )
     return speeches
 
 
