@@ -89,19 +89,36 @@ start_tunnel() {
   ensure_port_free "$local_port" "$name"
 
   echo "Starte $name-Tunnel auf $local_host:$local_port ..."
-  nohup ssh \
+  local match_pattern="$local_host:$local_port:$remote_host:$remote_port"
+
+  ssh \
     -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o StrictHostKeyChecking=accept-new \
     -i "$SSH_KEY" \
+    -f \
     -N \
     -L "$local_host:$local_port:$remote_host:$remote_port" \
     "$REMOTE_USER@$REMOTE_HOST" \
-    >"$log_file" 2>&1 &
+    < /dev/null \
+    >"$log_file" 2>&1
 
-  local tunnel_pid=$!
-  echo "$tunnel_pid" >"$pid_file"
+  local tunnel_pid=""
+  for _ in {1..20}; do
+    tunnel_pid="$(pgrep -f "ssh .*${match_pattern}" | head -n 1 || true)"
+    if [[ -n "$tunnel_pid" ]]; then
+      echo "$tunnel_pid" >"$pid_file"
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ -z "$tunnel_pid" ]]; then
+    echo "$name-Tunnel konnte nicht gestartet werden."
+    echo "Log: $log_file"
+    exit 1
+  fi
 
   for _ in {1..20}; do
     if port_is_listening "$local_port"; then
@@ -142,7 +159,7 @@ start_frontend() {
   echo "Starte Frontend auf http://$FRONTEND_HOST:$FRONTEND_PORT ..."
   (
     cd "$ADMIN_DIR"
-    nohup npm run dev -- --hostname "$FRONTEND_HOST" >"$FRONTEND_LOG" 2>&1 &
+    nohup bash -lc "cd \"$ADMIN_DIR\" && exec ./node_modules/.bin/next dev --hostname \"$FRONTEND_HOST\"" >"$FRONTEND_LOG" 2>&1 &
     echo $! >"$FRONTEND_PID_FILE"
   )
 
@@ -163,15 +180,13 @@ require_cmd lsof
 require_cmd npm
 require_cmd ssh
 
-start_tunnel "API" "$API_HOST" "$API_PORT" "$REMOTE_API_HOST" "$REMOTE_API_PORT" "$API_TUNNEL_PID_FILE" "$API_TUNNEL_LOG"
 start_tunnel "DB" "$DB_HOST" "$DB_PORT" "$REMOTE_DB_HOST" "$REMOTE_DB_PORT" "$DB_TUNNEL_PID_FILE" "$DB_TUNNEL_LOG"
 start_frontend
 
 echo
 echo "Fertig."
 echo "Frontend: http://127.0.0.1:3000"
-echo "API:      http://127.0.0.1:8000"
+echo "API:      https://api.spdfraktion-intern.de"
 echo "DB:       postgres://127.0.0.1:15432 -> remote 5432"
 echo "Frontend-Log: $FRONTEND_LOG"
-echo "API-Tunnel-Log: $API_TUNNEL_LOG"
 echo "DB-Tunnel-Log:  $DB_TUNNEL_LOG"

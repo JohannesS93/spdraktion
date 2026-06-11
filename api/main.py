@@ -2911,6 +2911,21 @@ def get_my_live_info(
     return payload
 
 
+@app.get("/me/faction-speakers")
+def get_my_faction_speakers(
+    at: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    _resolve_actor_scope(authorization)
+    effective_at = _parse_iso_datetime(at) if at else None
+    parliament_payload = _build_parliament_live_payload(at=effective_at)
+    return {
+        "generated_at": datetime.now(EUROPE_BERLIN).isoformat(),
+        "effective_at": (effective_at or datetime.now(EUROPE_BERLIN)).isoformat(),
+        "speeches": _build_faction_speech_entries(parliament_payload=parliament_payload),
+    }
+
+
 def ensure_mail_import_tables():
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:

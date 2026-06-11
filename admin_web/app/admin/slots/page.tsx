@@ -752,13 +752,6 @@ export default function SlotsPage() {
     >
       <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
         <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <div className="text-sm font-semibold text-slate-900">Wofuer diese Seite gedacht ist</div>
-            <div className="mt-1 text-sm text-slate-600">
-              Slots sind fuer Feinpflege gedacht: einzelne Termine pruefen, Personen ansehen und
-              manuelle Nacharbeit erledigen. Die grobe Wochenverteilung passiert vorher im Planer.
-            </div>
-          </div>
           <Link href="/admin/handbook" className="inline-flex">
             <Button className="admin-btn" variant="outline">
               Handbuch oeffnen

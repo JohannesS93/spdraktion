@@ -230,6 +230,26 @@ export default function InformationenPage() {
   const [selectedTop, setSelectedTop] = useState<string | null>(null);
   const [selectedSessionDate, setSelectedSessionDate] = useState<string | null>(null);
 
+  const fetchFactionSpeeches = useCallback(
+    async (token?: string | null, suffix = "") => {
+      try {
+        const speechesRes = await fetch(`${API_BASE}/me/faction-speakers${suffix}`, {
+          cache: "no-store",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!speechesRes.ok) {
+          setFactionSpeeches([]);
+          return;
+        }
+        const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
+        setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
+      } catch {
+        setFactionSpeeches([]);
+      }
+    },
+    [],
+  );
+
   const loadInfo = useCallback(async () => {
     setRefreshing(true);
     setError(null);
@@ -243,28 +263,17 @@ export default function InformationenPage() {
         const text = await res.text().catch(() => "");
         throw new Error(text || `HTTP ${res.status}`);
       }
-      const [data, speechesRes] = await Promise.all([
-        res.json() as Promise<ParliamentInfo>,
-        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers`, {
-          cache: "no-store",
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }),
-      ]);
+      const data = (await res.json()) as ParliamentInfo;
       setInfo(data);
       setAgendaInfo((previous) => previous ?? data);
       setSelectedSessionDate((previous) => previous ?? data.current_session?.date ?? null);
-      if (speechesRes.ok) {
-        const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
-        setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
-      } else {
-        setFactionSpeeches([]);
-      }
+      await fetchFactionSpeeches(token);
     } catch (err) {
       setError(String(err));
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [fetchFactionSpeeches]);
 
   const loadAgendaForDate = useCallback(async (sessionDate?: string | null) => {
     if (!sessionDate) return;
@@ -274,16 +283,10 @@ export default function InformationenPage() {
       const token = await auth.currentUser?.getIdToken();
       const query = new URLSearchParams({ at: `${sessionDate}T12:00:00+02:00` });
       const suffix = `?${query.toString()}`;
-      const [agendaRes, speechesRes] = await Promise.all([
-        fetch(`${API_BASE}/me/live-info${suffix}`, {
-          cache: "no-store",
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }),
-        fetch(`${API_BASE}/admin/kurzuebersicht/faction-speakers${suffix}`, {
-          cache: "no-store",
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }),
-      ]);
+      const agendaRes = await fetch(`${API_BASE}/me/live-info${suffix}`, {
+        cache: "no-store",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (!agendaRes.ok) {
         const text = await agendaRes.text().catch(() => "");
         throw new Error(text || `HTTP ${agendaRes.status}`);
@@ -292,18 +295,13 @@ export default function InformationenPage() {
       setAgendaInfo(data);
       setSelectedSessionDate(sessionDate);
       setSelectedTop(null);
-      if (speechesRes.ok) {
-        const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
-        setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
-      } else {
-        setFactionSpeeches([]);
-      }
+      await fetchFactionSpeeches(token, suffix);
     } catch (err) {
       setError(String(err));
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [fetchFactionSpeeches]);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
