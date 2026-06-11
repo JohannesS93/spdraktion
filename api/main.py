@@ -2939,9 +2939,16 @@ def ensure_mail_import_tables():
                     attachment_name TEXT NOT NULL,
                     attachment_category TEXT NOT NULL,
                     document_id UUID REFERENCES documents(id) ON DELETE SET NULL,
+                    skip_reason TEXT,
                     imported_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE (mailbox_uid, attachment_name, attachment_category)
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE mail_import_events
+                ADD COLUMN IF NOT EXISTS skip_reason TEXT
                 """
             )
         conn.commit()
@@ -3040,7 +3047,7 @@ def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
 def _extract_kurzuebersicht_header_metadata(text: str) -> dict | None:
     normalized_text = text.replace("\u00a0", " ")
     title_match = re.search(
-        r"Kurzübersicht über Plenarthemen vom\s+(.+)",
+        r"Kurzübersicht über Plenarthemen (?:vom|am)\s+(.+)",
         normalized_text,
         flags=re.IGNORECASE,
     )
@@ -3391,6 +3398,7 @@ def _record_mail_import_event(
     attachment_name: str,
     attachment_category: str,
     document_id: str | None,
+    skip_reason: str | None = None,
 ):
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -3402,10 +3410,16 @@ def _record_mail_import_event(
                     subject,
                     attachment_name,
                     attachment_category,
-                    document_id
+                    document_id,
+                    skip_reason
                 )
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (mailbox_uid, attachment_name, attachment_category) DO NOTHING
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (mailbox_uid, attachment_name, attachment_category) DO UPDATE
+                SET
+                    document_id = EXCLUDED.document_id,
+                    skip_reason = EXCLUDED.skip_reason,
+                    subject = EXCLUDED.subject,
+                    message_id = EXCLUDED.message_id
                 """,
                 (
                     mailbox_uid,
@@ -3414,6 +3428,7 @@ def _record_mail_import_event(
                     attachment_name,
                     attachment_category,
                     document_id,
+                    skip_reason,
                 ),
             )
         conn.commit()
@@ -3451,25 +3466,77 @@ def _prepare_kurzuebersicht_pdf(payload: bytes) -> dict | None:
     }
 
 
-def _prepare_mail_attachment(subject: str, filename: str, payload: bytes, mime_type: str | None) -> dict | None:
+def _prepare_ausgezeichnete_tagesordnung_pdf(payload: bytes, stand: datetime | None = None) -> dict | None:
+    page_texts = _extract_pdf_page_texts(payload)
+    if not page_texts:
+        return None
+
+    start_index = None
+    for index, page_text in enumerate(page_texts):
+        normalized = page_text.replace("\u00a0", " ")
+        if re.search(r"(^|\n)\s*Tagesordnung\s*(\n|$)", normalized, flags=re.IGNORECASE):
+            start_index = index
+            break
+
+    if start_index is None:
+        return None
+
+    reader = PdfReader(BytesIO(payload))
+    writer = PdfWriter()
+    for index in range(start_index, len(reader.pages)):
+        writer.add_page(reader.pages[index])
+
+    buffer = BytesIO()
+    writer.write(buffer)
+    pdf_bytes = buffer.getvalue()
+    title = (
+        f"Ausgezeichnete TO {stand.strftime('%d-%b %HUhr')}"
+        if stand is not None
+        else "Ausgezeichnete Tagesordnung"
+    )
+    return {
+        "category": "ausgezeichnete_tagesordnung",
+        "title": title,
+        "filename": f"{title}.pdf",
+        "mime_type": "application/pdf",
+        "content_bytes": pdf_bytes,
+        "stand": stand,
+    }
+
+
+def _prepare_mail_attachment(subject: str, filename: str, payload: bytes, mime_type: str | None) -> list[dict]:
     lower_filename = (filename or "").lower()
     lower_mime = (mime_type or "").lower()
 
-    candidate = None
+    candidates: list[dict] = []
     try:
         if lower_filename.endswith(".pdf") or lower_mime == "application/pdf":
-            candidate = _prepare_kurzuebersicht_pdf(payload)
+            kurzuebersicht_candidate = _prepare_kurzuebersicht_pdf(payload)
+            if kurzuebersicht_candidate:
+                latest_stand = _load_latest_kurzuebersicht_stand()
+                if latest_stand is not None and kurzuebersicht_candidate["stand"] <= latest_stand:
+                    kurzuebersicht_candidate["skip_reason"] = "stand_not_newer"
+                candidates.append(kurzuebersicht_candidate)
+
+                tagesordnung_candidate = _prepare_ausgezeichnete_tagesordnung_pdf(
+                    payload,
+                    stand=kurzuebersicht_candidate.get("stand"),
+                )
+                if tagesordnung_candidate:
+                    latest_tagesordnung = _load_latest_document_record("ausgezeichnete_tagesordnung")
+                    if latest_tagesordnung and latest_tagesordnung.get("title") == tagesordnung_candidate["title"]:
+                        tagesordnung_candidate["skip_reason"] = "stand_not_newer"
+                    candidates.append(tagesordnung_candidate)
     except Exception as exc:
         print(f"MAIL IMPORT PREP FAILED filename={filename} error={exc}", flush=True)
-        return None
+        return []
 
-    if not candidate:
-        return None
-
-    latest_stand = _load_latest_kurzuebersicht_stand()
-    if latest_stand is not None and candidate["stand"] <= latest_stand:
-        candidate["skip_reason"] = "stand_not_newer"
-    return candidate
+    if not candidates:
+        print(
+            f"MAIL IMPORT SKIP filename={filename} reason=no_supported_document_found subject={subject}",
+            flush=True,
+        )
+    return candidates
 
 
 def run_mail_import_once():
@@ -3533,65 +3600,68 @@ def run_mail_import_once():
                 ):
                     continue
 
-                if _attachment_already_imported(
-                    mailbox_uid=mailbox_uid,
-                    attachment_name=filename,
-                    attachment_category="kurzuebersicht",
-                ):
-                    continue
-
                 payload = part.get_payload(decode=True) or b""
                 if not payload:
                     continue
 
                 mime_type = part.get_content_type() or "application/octet-stream"
-                prepared = _prepare_mail_attachment(subject, filename, payload, mime_type)
-                if not prepared:
+                prepared_items = _prepare_mail_attachment(subject, filename, payload, mime_type)
+                if not prepared_items:
                     continue
 
-                if prepared.get("skip_reason") == "stand_not_newer":
+                for prepared in prepared_items:
+                    if _attachment_already_imported(
+                        mailbox_uid=mailbox_uid,
+                        attachment_name=filename,
+                        attachment_category=prepared["category"],
+                    ):
+                        continue
+
+                    if prepared.get("skip_reason") == "stand_not_newer":
+                        _record_mail_import_event(
+                            mailbox_uid=mailbox_uid,
+                            message_id=message_id,
+                            subject=subject,
+                            attachment_name=filename,
+                            attachment_category=prepared["category"],
+                            document_id=None,
+                            skip_reason="stand_not_newer",
+                        )
+                        continue
+
+                    title = prepared["title"]
+                    document_id = _persist_document_record(
+                        title=title,
+                        category=prepared["category"],
+                        original_filename=prepared["filename"],
+                        mime_type=prepared["mime_type"],
+                        content_bytes=prepared["content_bytes"],
+                        recipient_ids=recipient_ids,
+                        uploaded_by_user_id=None,
+                    )
                     _record_mail_import_event(
                         mailbox_uid=mailbox_uid,
                         message_id=message_id,
                         subject=subject,
                         attachment_name=filename,
                         attachment_category=prepared["category"],
-                        document_id=None,
+                        document_id=document_id,
+                        skip_reason=None,
                     )
-                    continue
-
-                title = prepared["title"]
-                document_id = _persist_document_record(
-                    title=title,
-                    category=prepared["category"],
-                    original_filename=prepared["filename"],
-                    mime_type=prepared["mime_type"],
-                    content_bytes=prepared["content_bytes"],
-                    recipient_ids=recipient_ids,
-                    uploaded_by_user_id=None,
-                )
-                _record_mail_import_event(
-                    mailbox_uid=mailbox_uid,
-                    message_id=message_id,
-                    subject=subject,
-                    attachment_name=filename,
-                    attachment_category=prepared["category"],
-                    document_id=document_id,
-                )
-                _notify_new_document(
-                    title=title,
-                    recipient_ids=recipient_ids,
-                )
-                imported.append(
-                    {
-                        "document_id": document_id,
-                        "category": prepared["category"],
-                        "title": title,
-                        "filename": prepared["filename"],
-                        "mailbox_uid": mailbox_uid,
-                        "stand": prepared["stand"].isoformat() if prepared.get("stand") else None,
-                    }
-                )
+                    _notify_new_document(
+                        title=title,
+                        recipient_ids=recipient_ids,
+                    )
+                    imported.append(
+                        {
+                            "document_id": document_id,
+                            "category": prepared["category"],
+                            "title": title,
+                            "filename": prepared["filename"],
+                            "mailbox_uid": mailbox_uid,
+                            "stand": prepared["stand"].isoformat() if prepared.get("stand") else None,
+                        }
+                    )
 
     return {
         "processed_messages": processed_messages,
@@ -3627,6 +3697,36 @@ def _parse_kurzuebersicht_date(value: str) -> date | None:
         "Dezember": 12,
     }
 
+    month = month_map.get(date_match.group(3))
+    if not month:
+        return None
+
+    return date(int(date_match.group(4)), month, int(date_match.group(2)))
+
+
+def _parse_tagesordnung_date(value: str) -> date | None:
+    normalized = _normalize_kurzuebersicht_line(value)
+    date_match = re.search(
+        r"(Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag),?\s+(?:dem|den)?\s*(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]+)\s*(\d{4})",
+        normalized,
+    )
+    if not date_match:
+        return None
+
+    month_map = {
+        "Januar": 1,
+        "Februar": 2,
+        "März": 3,
+        "April": 4,
+        "Mai": 5,
+        "Juni": 6,
+        "Juli": 7,
+        "August": 8,
+        "September": 9,
+        "Oktober": 10,
+        "November": 11,
+        "Dezember": 12,
+    }
     month = month_map.get(date_match.group(3))
     if not month:
         return None
@@ -3725,7 +3825,7 @@ def _parse_kurzuebersicht_entries(pdf_bytes: bytes) -> list[dict]:
     i = 0
     while i < len(lines):
         line = lines[i]
-        parsed_date = _parse_kurzuebersicht_date(line)
+        parsed_date = _parse_kurzuebersicht_date(line) or _parse_tagesordnung_date(line)
         if parsed_date is not None:
             current_date = parsed_date
             i += 1
@@ -3864,6 +3964,130 @@ def _build_latest_kurzuebersicht_payload() -> dict | None:
     }
 
 
+def _parse_ausgezeichnete_tagesordnung_roll_calls(pdf_bytes: bytes) -> list[dict]:
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    except Exception:
+        return []
+
+    lines = [_normalize_kurzuebersicht_line(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+
+    events: list[dict] = []
+    current_date: date | None = None
+    current_top: str | None = None
+    current_title_lines: list[str] = []
+
+    def flush_title_line(line: str) -> None:
+        if (
+            not line
+            or line.startswith("Drucksache")
+            or line.startswith("Überweisungsvorschlag")
+            or line.startswith("Beratung")
+            or line.startswith("Ablehnung")
+            or line.startswith("Zustimmung")
+            or line.startswith("21. Wahlperiode")
+            or line in {"Namentliche", "Abstimmung"}
+        ):
+            return
+        current_title_lines.append(line)
+
+    def current_title() -> str:
+        return " ".join(current_title_lines).strip() or "Namentliche Abstimmung"
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        parsed_date = _parse_kurzuebersicht_date(line)
+        if parsed_date is not None:
+            current_date = parsed_date
+            current_top = None
+            current_title_lines = []
+            i += 1
+            continue
+
+        top_match = re.match(r"^((?:ZP\s*)?\d+)\.?(?:\s*[–-])?\s+(.*)$", line, flags=re.IGNORECASE)
+        if top_match:
+            raw_top, remainder = top_match.groups()
+            current_top = re.sub(r"\s+", " ", raw_top.upper()).strip()
+            current_title_lines = []
+            flush_title_line(remainder)
+            i += 1
+            continue
+
+        if current_date is None:
+            i += 1
+            continue
+
+        combined_line = line
+        if line == "Namentliche" and i + 1 < len(lines) and lines[i + 1] == "Abstimmung":
+            combined_line = "Namentliche Abstimmung"
+            i += 1
+
+        if "namentliche abstimmung" in combined_line.lower() or "namentlichen abstimmung" in combined_line.lower():
+            match = re.search(
+                r"(?:ca\.\s*)?(\d{1,2}:\d{2})\s+bis\s+(\d{1,2}:\d{2}).*?Namentlichen Abstimmung zu\s+((?:ZP|TOP)\s*\d+[a-z]?)",
+                combined_line,
+                flags=re.IGNORECASE,
+            )
+            start_at = None
+            end_at = None
+            top_label = current_top
+            if match:
+                start_label, end_label, explicit_top_label = match.groups()
+                top_label = re.sub(r"\s+", " ", explicit_top_label.upper()).strip()
+                start_at = datetime.combine(
+                    current_date,
+                    datetime.strptime(start_label, "%H:%M").time(),
+                    tzinfo=EUROPE_BERLIN,
+                )
+                end_at = datetime.combine(
+                    current_date,
+                    datetime.strptime(end_label, "%H:%M").time(),
+                    tzinfo=EUROPE_BERLIN,
+                )
+            duration_match = re.search(r"\((\d+)\s*Minuten[^)]*\)", combined_line, flags=re.IGNORECASE)
+            events.append(
+                {
+                    "date": current_date.isoformat(),
+                    "top": top_label,
+                    "title": current_title(),
+                    "start_at": start_at,
+                    "end_at": end_at,
+                    "duration_minutes": int(duration_match.group(1)) if duration_match else None,
+                    "note": combined_line,
+                    "pdf_url": None,
+                    "source": "ausgezeichnete_tagesordnung",
+                }
+            )
+            i += 1
+            continue
+
+        if current_top:
+            flush_title_line(line)
+        i += 1
+
+    return events
+
+
+def _build_latest_ausgezeichnete_tagesordnung_payload() -> dict | None:
+    document = _load_latest_document_record("ausgezeichnete_tagesordnung")
+    pdf_bytes = _extract_document_bytes(document)
+    if not document or not pdf_bytes:
+        return None
+
+    return {
+        "document": {
+            "id": document["id"],
+            "title": document["title"],
+            "filename": document["filename"],
+            "created_at": document["created_at"],
+        },
+        "roll_calls": _parse_ausgezeichnete_tagesordnung_roll_calls(pdf_bytes),
+    }
+
+
 def _normalize_parliament_top_labels(value: str | None) -> list[str]:
     raw = re.sub(r"\s+", " ", (value or "").strip().upper())
     if not raw:
@@ -3951,78 +4175,114 @@ def _find_session_point_for_kurzuebersicht_entry(entry: dict, sessions: list[dic
     return None
 
 
+def _find_session_point_for_top_label(
+    top_label: str | None,
+    entry_date: str | None,
+    sessions: list[dict],
+) -> dict | None:
+    normalized_labels = set(_normalize_parliament_top_labels(top_label))
+    if not normalized_labels or not entry_date:
+        return None
+
+    for session in sessions:
+        session_date = session.get("date")
+        if session_date is None or session_date.isoformat() != entry_date:
+            continue
+        for point in session.get("points") or []:
+            point_labels = set(_normalize_parliament_top_labels(point.get("top")))
+            if point_labels & normalized_labels:
+                return point
+
+    return None
+
+
 def _build_kurzuebersicht_roll_call_events() -> list[dict]:
     latest_payload = _build_latest_kurzuebersicht_payload()
-    if not latest_payload:
-        return []
-
-    sessions = _parse_bundestag_conferences()
     events: list[dict] = []
-    for entry in latest_payload["entries"]:
-        top_labels = entry.get("top_labels") or []
-        title = entry.get("title")
-        point = _find_session_point_for_kurzuebersicht_entry(entry, sessions)
-        primary_top = (top_labels[0] if top_labels else None) or None
+    sessions = _parse_bundestag_conferences()
+    if latest_payload:
+        for entry in latest_payload["entries"]:
+            top_labels = entry.get("top_labels") or []
+            title = entry.get("title")
+            point = _find_session_point_for_kurzuebersicht_entry(entry, sessions)
+            primary_top = (top_labels[0] if top_labels else None) or None
 
-        note_roll_calls = []
-        for note in entry.get("notes") or []:
-            match = re.search(
-                r"ca\.\s*(\d{1,2}:\d{2})\s+bis\s+(\d{1,2}:\d{2}).*?Namentlichen Abstimmung zu\s+((?:ZP|TOP)\s*\d+[a-z]?)",
-                note,
-                re.IGNORECASE,
-            )
-            if not match:
+            note_roll_calls = []
+            for note in entry.get("notes") or []:
+                match = re.search(
+                    r"ca\.\s*(\d{1,2}:\d{2})\s+bis\s+(\d{1,2}:\d{2}).*?Namentlichen Abstimmung zu\s+((?:ZP|TOP)\s*\d+[a-z]?)",
+                    note,
+                    re.IGNORECASE,
+                )
+                if not match:
+                    continue
+                start_label, end_label, top_label = match.groups()
+                entry_date = datetime.fromisoformat(entry["start_at"]).date()
+                start_at = datetime.combine(
+                    entry_date,
+                    datetime.strptime(start_label, "%H:%M").time(),
+                    tzinfo=EUROPE_BERLIN,
+                )
+                end_at = datetime.combine(
+                    entry_date,
+                    datetime.strptime(end_label, "%H:%M").time(),
+                    tzinfo=EUROPE_BERLIN,
+                )
+                duration_match = re.search(r"(\d+)\s*Minuten", note, re.IGNORECASE)
+                note_roll_calls.append(
+                    {
+                        "top": re.sub(r"\s+", " ", top_label.upper()).strip(),
+                        "title": title,
+                        "start_at": start_at,
+                        "end_at": end_at,
+                        "duration_minutes": int(duration_match.group(1)) if duration_match else None,
+                        "note": note,
+                        "pdf_url": latest_payload["document"].get("filename"),
+                        "source": "kurzuebersicht_note",
+                    }
+                )
+
+            if note_roll_calls:
+                events.extend(note_roll_calls)
                 continue
-            start_label, end_label, top_label = match.groups()
-            entry_date = datetime.fromisoformat(entry["start_at"]).date()
-            start_at = datetime.combine(
-                entry_date,
-                datetime.strptime(start_label, "%H:%M").time(),
-                tzinfo=EUROPE_BERLIN,
-            )
-            end_at = datetime.combine(
-                entry_date,
-                datetime.strptime(end_label, "%H:%M").time(),
-                tzinfo=EUROPE_BERLIN,
-            )
-            duration_match = re.search(r"(\d+)\s*Minuten", note, re.IGNORECASE)
-            note_roll_calls.append(
+
+            title_and_notes = " ".join(
+                [title or "", *[note for note in (entry.get("notes") or []) if note]]
+            ).lower()
+            if "namentliche abstimmung" not in title_and_notes:
+                continue
+
+            end_at = _point_effective_end(point) if point else None
+            start_at = point.get("start_at") if point else datetime.fromisoformat(entry["start_at"])
+            events.append(
                 {
-                    "top": re.sub(r"\s+", " ", top_label.upper()).strip(),
+                    "top": primary_top,
                     "title": title,
                     "start_at": start_at,
-                    "end_at": end_at,
-                    "duration_minutes": int(duration_match.group(1)) if duration_match else None,
-                    "note": note,
-                    "pdf_url": latest_payload["document"].get("filename"),
-                    "source": "kurzuebersicht_note",
+                    "end_at": end_at or start_at,
+                    "duration_minutes": None,
+                    "note": None,
+                    "pdf_url": None,
+                    "source": "kurzuebersicht_entry",
                 }
             )
 
-        if note_roll_calls:
-            events.extend(note_roll_calls)
-            continue
-
-        title_and_notes = " ".join(
-            [title or "", *[note for note in (entry.get("notes") or []) if note]]
-        ).lower()
-        if "namentliche abstimmung" not in title_and_notes:
-            continue
-
-        end_at = _point_effective_end(point) if point else None
-        start_at = point.get("start_at") if point else datetime.fromisoformat(entry["start_at"])
-        events.append(
-            {
-                "top": primary_top,
-                "title": title,
-                "start_at": start_at,
-                "end_at": end_at or start_at,
-                "duration_minutes": None,
-                "note": None,
-                "pdf_url": None,
-                "source": "kurzuebersicht_entry",
-            }
-        )
+    tagesordnung_payload = _build_latest_ausgezeichnete_tagesordnung_payload()
+    if tagesordnung_payload:
+        for item in tagesordnung_payload["roll_calls"]:
+            point = _find_session_point_for_top_label(
+                item.get("top"),
+                item.get("date"),
+                sessions,
+            )
+            events.append(
+                {
+                    **item,
+                    "start_at": item.get("start_at") or ((point or {}).get("start_at")),
+                    "end_at": item.get("end_at") or _point_effective_end(point or {}),
+                    "pdf_url": tagesordnung_payload["document"].get("filename"),
+                }
+            )
 
     deduped: dict[tuple[str, str, str], dict] = {}
     for item in events:
