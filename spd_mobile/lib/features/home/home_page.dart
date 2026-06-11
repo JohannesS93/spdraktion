@@ -364,6 +364,10 @@ class _HomePageState extends State<HomePage> {
                       liveInfo?['next_speech'] as Map<String, dynamic>?;
                   final nextPgfDuty =
                       liveInfo?['next_pgf_duty'] as Map<String, dynamic>?;
+                  final viewer = liveInfo?['viewer'] as Map<String, dynamic>?;
+                  final principalName = (viewer?['principal_name'] ?? '')
+                      .toString()
+                      .trim();
 
                   return RefreshIndicator(
                     onRefresh: refresh,
@@ -388,7 +392,7 @@ class _HomePageState extends State<HomePage> {
                                   ),
                                   SizedBox(height: 2),
                                   Text(
-                                    'Interne Informationen fuer die SPD-Bundestagsfraktion',
+                                    'Interne Informationen für die SPD-Bundestagsfraktion',
                                     style: TextStyle(
                                       fontSize: 13,
                                       color: Color(0xFF6B6B6B),
@@ -456,7 +460,7 @@ class _HomePageState extends State<HomePage> {
                           children: [
                             Expanded(
                               child: _KpiCard(
-                                title: 'Naechster Dienst',
+                                title: 'Nächster Dienst',
                                 value: _nextSlotKpiValue(data.nextSlot),
                                 hint: _nextSlotKpiHint(data.nextSlot),
                                 icon: Icons.calendar_month_outlined,
@@ -481,14 +485,10 @@ class _HomePageState extends State<HomePage> {
                           ],
                         ),
                         const SizedBox(height: 18),
-                        _SectionTitle(
-                          title: 'Plenum aktuell',
-                          subtitle:
-                              'Live-Daten fuer namentliche Abstimmungen, Reden und PGF-Dienste',
-                        ),
+                        _SectionTitle(title: 'Plenum aktuell', subtitle: ''),
                         const SizedBox(height: 10),
                         _InfoPanelCard(
-                          title: 'Naechste namentliche',
+                          title: 'Nächste namentliche',
                           headline: _pointLabel(nextRollCall),
                           detail: nextRollCall == null
                               ? 'Aktuell keine kommende namentliche Abstimmung erkannt'
@@ -498,13 +498,15 @@ class _HomePageState extends State<HomePage> {
                         ),
                         const SizedBox(height: 12),
                         _InfoPanelCard(
-                          title: 'Naechste Rede',
+                          title: principalName.isEmpty
+                              ? 'Nächste Rede'
+                              : 'Nächste Rede - $principalName',
                           headline:
                               (nextSpeech?['title'] ?? '').toString().isEmpty
                               ? 'Noch keine Rede erkannt'
                               : (nextSpeech?['title'] ?? '').toString(),
                           detail: nextSpeech == null
-                              ? 'Die offizielle Redequelle ist aktuell noch nicht angebunden.'
+                              ? 'Aktuell keine kommende Rede erkannt'
                               : _formatDateTime(
                                   nextSpeech['start_at']?.toString(),
                                 ),
@@ -514,7 +516,7 @@ class _HomePageState extends State<HomePage> {
                         if (isPgf) ...[
                           const SizedBox(height: 12),
                           _InfoPanelCard(
-                            title: 'Naechster PGF-Dienst',
+                            title: 'Nächster PGF-Dienst',
                             headline: _formatPgfDutyHeadline(nextPgfDuty),
                             detail: _formatPgfDutyDetail(nextPgfDuty),
                             color: const Color(0xFF39424E),
@@ -681,7 +683,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _nextSlotKpiHint(Map<String, dynamic>? slot) {
-    if (slot == null) return 'Dienstplan oeffnen';
+    if (slot == null) return 'Dienstplan öffnen';
     final date = (slot['date'] ?? '').toString();
     if (date.isEmpty) return 'Details im Dienstplan';
     return date;
@@ -822,7 +824,7 @@ class _SessionBanner extends StatelessWidget {
               Icon(Icons.sensors, color: Colors.white),
               SizedBox(width: 8),
               Text(
-                'Sitzung laeuft',
+                'Sitzung läuft',
                 style: TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w800,
@@ -843,7 +845,7 @@ class _SessionBanner extends StatelessWidget {
           ),
           const SizedBox(height: 10),
           Text(
-            'Als Naechstes: $nextTop',
+            'Als Nächstes: $nextTop',
             style: const TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.w600,
@@ -852,7 +854,7 @@ class _SessionBanner extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             nextTopStart.isEmpty || nextTopStart == '—'
-                ? 'Naechster Start noch offen'
+                ? 'Nächster Start noch offen'
                 : 'Voraussichtlicher Start: $nextTopStart Uhr',
             style: const TextStyle(color: Colors.white70),
           ),
@@ -902,11 +904,13 @@ class _SectionTitle extends StatelessWidget {
           title,
           style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
         ),
-        const SizedBox(height: 2),
-        Text(
-          subtitle,
-          style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
-        ),
+        if (subtitle.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          Text(
+            subtitle,
+            style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+          ),
+        ],
       ],
     );
   }
@@ -1189,15 +1193,19 @@ class _InfoPanelCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 Text(
                   headline,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    fontWeight: FontWeight.w800,
-                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                    fontSize: 15,
                     height: 1.2,
                   ),
                 ),
                 const SizedBox(height: 6),
                 Text(
                   detail,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(color: Colors.grey.shade700, height: 1.3),
                 ),
               ],

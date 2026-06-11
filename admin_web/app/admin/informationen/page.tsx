@@ -590,7 +590,6 @@ export default function InformationenPage() {
               <CardTitle className="text-xl">Sitzungsagenda</CardTitle>
               <div className="text-sm text-slate-500">
                 {selectedDayLabel}
-                {isAgendaLiveDay ? " · mit Live-Abgleich" : ""}
               </div>
             </div>
             {visibleSessionDays.length > 0 ? (
@@ -828,10 +827,9 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
       <CardContent>
         {rollCall ? (
           <div className="space-y-3">
-            <div className="text-xs uppercase tracking-[0.24em] text-slate-500">
-              {rollCall.top || "Ohne TOP"}
+            <div className="line-clamp-2 text-sm leading-6 text-slate-900">
+              {pointLabel(rollCall)}
             </div>
-            <div className="text-base font-semibold text-slate-900">{pointLabel(rollCall)}</div>
             <div className="text-sm text-slate-500">
               Maßgeblich: {formatDateTime(rollCall.end_at || rollCall.start_at)}
             </div>
@@ -897,7 +895,9 @@ function SpeechCard({
       <CardContent>
         {speech ? (
           <div className="space-y-3">
-            <div className="text-base font-semibold text-slate-900">{speech.title || "Rede"}</div>
+            <div className="line-clamp-2 text-sm leading-6 text-slate-900">
+              {speech.title || "Rede"}
+            </div>
             <div className="text-sm text-slate-500">{formatDateTime(speech.start_at)}</div>
           </div>
         ) : (
