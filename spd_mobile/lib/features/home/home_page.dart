@@ -33,6 +33,11 @@ class _HomePageState extends State<HomePage> {
   final api = ApiClient(AppConfig.apiBaseUrl);
   late Future<_HomeData> future;
   Future<PackageInfo>? _packageInfoFuture;
+  Map<String, dynamic>? _agendaInfo;
+  List<Map<String, dynamic>> _agendaSpeeches = const [];
+  String? _selectedAgendaDate;
+  String? _selectedAgendaTopKey;
+  bool _agendaLoading = false;
 
   String _initialsFromName(String name) {
     final parts = name
@@ -214,6 +219,7 @@ class _HomePageState extends State<HomePage> {
         latestDocument: null,
         latestSummaryDocument: null,
         liveInfo: null,
+        factionSpeeches: [],
       );
     }
     return loadHome();
@@ -228,6 +234,7 @@ class _HomePageState extends State<HomePage> {
         latestDocument: null,
         latestSummaryDocument: null,
         liveInfo: null,
+        factionSpeeches: [],
       );
     }
 
@@ -268,6 +275,7 @@ class _HomePageState extends State<HomePage> {
         : latestSummary.first;
     final liveInfo =
         await api.getJson('/me/live-info') as Map<String, dynamic>?;
+    final factionSpeeches = await _loadFactionSpeeches();
 
     return _HomeData(
       nextSlot: nextSlot,
@@ -276,6 +284,7 @@ class _HomePageState extends State<HomePage> {
       latestDocument: latestDocument,
       latestSummaryDocument: latestSummaryDocument,
       liveInfo: liveInfo,
+      factionSpeeches: factionSpeeches,
     );
   }
 
@@ -292,6 +301,7 @@ class _HomePageState extends State<HomePage> {
             latestDocument: null,
             latestSummaryDocument: null,
             liveInfo: null,
+            factionSpeeches: [],
           ),
         );
       });
@@ -302,7 +312,82 @@ class _HomePageState extends State<HomePage> {
       future = loadHome();
     });
 
-    await future;
+    final latest = await future;
+    final currentSession =
+        latest.liveInfo?['current_session'] as Map<String, dynamic>?;
+    final currentSessionDate = (currentSession?['date'] ?? '')
+        .toString()
+        .trim();
+    if (_selectedAgendaDate != null &&
+        _selectedAgendaDate!.isNotEmpty &&
+        _selectedAgendaDate != currentSessionDate) {
+      await _loadAgendaForDate(_selectedAgendaDate!, silent: true);
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _agendaInfo = null;
+        _agendaSpeeches = latest.factionSpeeches;
+        _selectedAgendaTopKey = null;
+      });
+    }
+  }
+
+  Map<String, String>? _agendaQuery(String? sessionDate) {
+    if (sessionDate == null || sessionDate.isEmpty) return null;
+    return {'at': '${sessionDate}T12:00:00+02:00'};
+  }
+
+  Future<List<Map<String, dynamic>>> _loadFactionSpeeches({
+    String? sessionDate,
+  }) async {
+    final payload =
+        await api.getJson(
+              '/me/faction-speakers',
+              query: _agendaQuery(sessionDate),
+            )
+            as Map<String, dynamic>?;
+    final items =
+        (payload?['speeches'] ?? payload?['items'] ?? const <dynamic>[])
+            as List<dynamic>;
+    return items.map((item) => item as Map<String, dynamic>).toList();
+  }
+
+  Future<void> _loadAgendaForDate(
+    String sessionDate, {
+    bool silent = false,
+  }) async {
+    if (_agendaLoading) return;
+    setState(() {
+      _agendaLoading = true;
+      _selectedAgendaDate = sessionDate;
+      _selectedAgendaTopKey = null;
+    });
+    try {
+      final liveInfo =
+          await api.getJson('/me/live-info', query: _agendaQuery(sessionDate))
+              as Map<String, dynamic>?;
+      final speeches = await _loadFactionSpeeches(sessionDate: sessionDate);
+      if (!mounted) return;
+      setState(() {
+        _agendaInfo = liveInfo;
+        _agendaSpeeches = speeches;
+      });
+    } catch (_) {
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Die Sitzungsagenda konnte nicht geladen werden.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _agendaLoading = false;
+        });
+      }
+    }
   }
 
   @override
@@ -351,6 +436,7 @@ class _HomePageState extends State<HomePage> {
                         latestDocument: null,
                         latestSummaryDocument: null,
                         liveInfo: null,
+                        factionSpeeches: [],
                       );
                   final liveInfo = data.liveInfo;
                   final sessionRunning = liveInfo?['session_running'] == true;
@@ -368,6 +454,43 @@ class _HomePageState extends State<HomePage> {
                   final principalName = (viewer?['principal_name'] ?? '')
                       .toString()
                       .trim();
+                  final currentSession =
+                      liveInfo?['current_session'] as Map<String, dynamic>?;
+                  final currentSessionDate = (currentSession?['date'] ?? '')
+                      .toString()
+                      .trim();
+                  final effectiveAgendaDate =
+                      (_selectedAgendaDate == null ||
+                          _selectedAgendaDate!.isEmpty)
+                      ? currentSessionDate
+                      : _selectedAgendaDate!;
+                  final useAgendaOverride =
+                      _agendaInfo != null &&
+                      effectiveAgendaDate.isNotEmpty &&
+                      effectiveAgendaDate != currentSessionDate;
+                  final agendaInfo = useAgendaOverride ? _agendaInfo : liveInfo;
+                  final agendaSpeeches = useAgendaOverride
+                      ? _agendaSpeeches
+                      : data.factionSpeeches;
+                  final sessionDays =
+                      ((liveInfo?['session_days'] ?? const <dynamic>[])
+                              as List<dynamic>)
+                          .map((item) => item as Map<String, dynamic>)
+                          .toList();
+                  final visibleSessionDays = _visibleSessionDays(
+                    sessionDays,
+                    effectiveAgendaDate.isNotEmpty
+                        ? effectiveAgendaDate
+                        : (liveInfo?['effective_at'] ?? '').toString(),
+                  );
+                  final agendaPoints =
+                      ((agendaInfo?['agenda_points'] ?? const <dynamic>[])
+                              as List<dynamic>)
+                          .map((item) => item as Map<String, dynamic>)
+                          .toList();
+                  final isAgendaLiveDay =
+                      effectiveAgendaDate.isNotEmpty &&
+                      effectiveAgendaDate == currentSessionDate;
 
                   return RefreshIndicator(
                     onRefresh: refresh,
@@ -523,6 +646,136 @@ class _HomePageState extends State<HomePage> {
                             icon: Icons.badge_outlined,
                           ),
                         ],
+                        const SizedBox(height: 18),
+                        _SectionTitle(title: 'Sitzungsagenda', subtitle: ''),
+                        const SizedBox(height: 10),
+                        if (visibleSessionDays.isNotEmpty)
+                          SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: visibleSessionDays.map((day) {
+                                final date = (day['date'] ?? '').toString();
+                                final isSelected = date == effectiveAgendaDate;
+                                return Padding(
+                                  padding: const EdgeInsets.only(right: 8),
+                                  child: ChoiceChip(
+                                    label: Text(
+                                      ((day['date_text'] ?? day['date']) ?? '')
+                                          .toString(),
+                                    ),
+                                    selected: isSelected,
+                                    onSelected: (_) {
+                                      if (date.isEmpty) return;
+                                      if (date == currentSessionDate) {
+                                        setState(() {
+                                          _selectedAgendaDate = date;
+                                          _agendaInfo = null;
+                                          _agendaSpeeches =
+                                              data.factionSpeeches;
+                                          _selectedAgendaTopKey = null;
+                                        });
+                                        return;
+                                      }
+                                      _loadAgendaForDate(date);
+                                    },
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        if (visibleSessionDays.isNotEmpty)
+                          const SizedBox(height: 12),
+                        if (isAgendaLiveDay &&
+                            (currentTop != null || nextTop != null))
+                          _AgendaLiveMarker(
+                            currentTop: _pointLabel(currentTop),
+                            nextTop: _pointLabel(nextTop),
+                            currentRange: _formatPointRange(currentTop),
+                            nextRange: _formatPointRange(nextTop),
+                            effectiveAt: _formatDateTime(
+                              liveInfo?['effective_at']?.toString(),
+                              timeOnly: true,
+                            ),
+                          ),
+                        if (isAgendaLiveDay &&
+                            (currentTop != null || nextTop != null))
+                          const SizedBox(height: 12),
+                        if (_agendaLoading)
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 24),
+                            child: Center(child: CircularProgressIndicator()),
+                          )
+                        else if (agendaPoints.isEmpty)
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(22),
+                              border: Border.all(
+                                color: const Color(0xFFE8E1E3),
+                              ),
+                            ),
+                            child: Text(
+                              'Für diesen Sitzungstag liegen aktuell keine Tagesordnungspunkte vor.',
+                              style: TextStyle(color: Colors.grey.shade700),
+                            ),
+                          )
+                        else
+                          ...agendaPoints.map((point) {
+                            final pointTop = (point['top'] ?? '').toString();
+                            final pointTopKeys = _normalizeTopLabels(pointTop);
+                            final currentTopKeys = _normalizeTopLabels(
+                              currentTop?['top']?.toString(),
+                            );
+                            final nextTopKeys = _normalizeTopLabels(
+                              nextTop?['top']?.toString(),
+                            );
+                            final isCurrent =
+                                isAgendaLiveDay &&
+                                pointTopKeys.isNotEmpty &&
+                                pointTopKeys.any(currentTopKeys.contains);
+                            final isNext =
+                                isAgendaLiveDay &&
+                                pointTopKeys.isNotEmpty &&
+                                pointTopKeys.any(nextTopKeys.contains);
+                            final pointDate = _isoDatePart(
+                              point['start_at']?.toString(),
+                            );
+                            final speakers = _speakersForPoint(
+                              agendaSpeeches,
+                              pointTopKeys,
+                              pointDate,
+                            );
+                            final topKey = pointTopKeys.join('|');
+                            final isExpanded = _selectedAgendaTopKey == topKey;
+                            final displayTop = pointTopKeys.isNotEmpty
+                                ? _deriveDisplayTop(pointTopKeys, speakers)
+                                : pointTop;
+
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: _AgendaPointCard(
+                                displayTop: displayTop.isEmpty
+                                    ? 'Ohne TOP'
+                                    : displayTop,
+                                title: (point['title'] ?? 'Ohne Titel')
+                                    .toString(),
+                                timeRange: _formatPointRange(point),
+                                isCurrent: isCurrent,
+                                isNext: isNext,
+                                isExpanded: isExpanded,
+                                speakerCount: speakers.length,
+                                speakers: speakers,
+                                onTap: () {
+                                  setState(() {
+                                    _selectedAgendaTopKey = isExpanded
+                                        ? null
+                                        : topKey;
+                                  });
+                                },
+                              ),
+                            );
+                          }),
                         const SizedBox(height: 18),
                         _SectionTitle(
                           title: 'Schnellzugriff',
@@ -753,6 +1006,228 @@ class _HomePageState extends State<HomePage> {
     return time;
   }
 
+  List<Map<String, dynamic>> _visibleSessionDays(
+    List<Map<String, dynamic>> sessionDays,
+    String baseValue,
+  ) {
+    final baseDate = DateTime.tryParse(
+      baseValue.length == 10 ? '${baseValue}T12:00:00+02:00' : baseValue,
+    );
+    if (baseDate == null) return sessionDays;
+    final weekStart = _startOfWeek(baseDate);
+    final weekEnd = weekStart.add(const Duration(days: 6));
+    return sessionDays.where((day) {
+      final date = (day['date'] ?? '').toString();
+      final parsed = DateTime.tryParse('${date}T12:00:00+02:00');
+      if (parsed == null) return false;
+      return !parsed.isBefore(weekStart) && !parsed.isAfter(weekEnd);
+    }).toList();
+  }
+
+  DateTime _startOfWeek(DateTime date) {
+    final local = DateTime(date.year, date.month, date.day);
+    final weekday = local.weekday;
+    return local.subtract(Duration(days: weekday - 1));
+  }
+
+  String? _isoDatePart(String? value) {
+    if (value == null || value.length < 10) return null;
+    return value.substring(0, 10);
+  }
+
+  List<String> _normalizeTopLabels(String? value) {
+    final raw = (value ?? '').trim().toUpperCase();
+    if (raw.isEmpty) return const [];
+    final parts = raw
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .split(',')
+        .map((part) => part.trim())
+        .where((part) => part.isNotEmpty);
+    final labels = <String>[];
+
+    void pushLabel(String? prefix, String number) {
+      labels.add(prefix == 'ZP' ? 'ZP $number' : number);
+    }
+
+    for (final part in parts) {
+      final rangeMatch = RegExp(
+        r'^(TOP|ZP)?\s*(\d+)\s*[-–]\s*(\d+)$',
+      ).firstMatch(part);
+      if (rangeMatch != null) {
+        final prefix = rangeMatch.group(1);
+        final start = int.tryParse(rangeMatch.group(2)!);
+        final end = int.tryParse(rangeMatch.group(3)!);
+        if (start != null && end != null && end >= start) {
+          for (var current = start; current <= end; current += 1) {
+            pushLabel(prefix, '$current');
+          }
+          continue;
+        }
+      }
+
+      final plusMatch = RegExp(r'^(TOP|ZP)?\s*(\d+)\+(\d+)$').firstMatch(part);
+      if (plusMatch != null) {
+        final prefix = plusMatch.group(1);
+        pushLabel(prefix, plusMatch.group(2)!);
+        pushLabel(prefix, plusMatch.group(3)!);
+        continue;
+      }
+
+      final simpleMatch = RegExp(r'^(TOP|ZP)?\s*(\d+[A-Z]?)$').firstMatch(part);
+      if (simpleMatch != null) {
+        pushLabel(simpleMatch.group(1), simpleMatch.group(2)!);
+        continue;
+      }
+
+      labels.add(
+        part
+            .replaceAll(RegExp(r'\bTOP\s+'), '')
+            .replaceAll(RegExp(r'\bZP\s+'), 'ZP '),
+      );
+    }
+
+    return labels.toSet().toList();
+  }
+
+  String _topNumberOnly(String label) {
+    return label
+        .replaceFirst(RegExp(r'^ZP\s+', caseSensitive: false), '')
+        .trim();
+  }
+
+  bool _sameTopNumberSequence(List<String> left, List<String> right) {
+    if (left.length != right.length) return false;
+    final leftKey = left.map(_topNumberOnly).join('|');
+    final rightKey = right.map(_topNumberOnly).join('|');
+    return leftKey == rightKey;
+  }
+
+  bool _topSetsIntersect(List<String> left, List<String> right) {
+    return left.any(right.contains);
+  }
+
+  bool _speechMatchesPoint(
+    List<String> pointLabels,
+    List<String> speechLabels,
+  ) {
+    final normalizedSpeechLabels = speechLabels.toSet().toList();
+    if (pointLabels.isEmpty || normalizedSpeechLabels.isEmpty) return false;
+    if (_sameTopNumberSequence(pointLabels, normalizedSpeechLabels)) {
+      return true;
+    }
+    if (pointLabels.length == 1 || normalizedSpeechLabels.length == 1) {
+      return _topSetsIntersect(pointLabels, normalizedSpeechLabels);
+    }
+    return false;
+  }
+
+  List<Map<String, dynamic>> _speakersForPoint(
+    List<Map<String, dynamic>> speeches,
+    List<String> pointTopKeys,
+    String? pointDate,
+  ) {
+    final deduped = <String, Map<String, dynamic>>{};
+    for (final speech in speeches) {
+      final labels = [
+        ...((speech['top_labels'] as List<dynamic>? ?? const <dynamic>[]).map(
+          (item) => item.toString(),
+        )),
+        if ((speech['top'] ?? '').toString().isNotEmpty)
+          (speech['top'] ?? '').toString(),
+      ].expand(_normalizeTopLabels).toList();
+      final speechDate = _isoDatePart(
+        (speech['effective_start_at'] ?? speech['planned_start_at'])
+            ?.toString(),
+      );
+      if (speechDate != pointDate ||
+          !_speechMatchesPoint(pointTopKeys, labels)) {
+        continue;
+      }
+      final displayName =
+          ((speech['source_speaker_name'] ??
+                      speech['speaker_name'] ??
+                      'Unbekannt')
+                  .toString())
+              .trim();
+      final key =
+          '${displayName.toUpperCase()}|${(speech['top'] ?? '').toString()}';
+      deduped[key] = {...speech, 'speaker_name': displayName};
+    }
+    final result = deduped.values.toList();
+    result.sort((a, b) {
+      final aHasLive =
+          (a['has_live_time'] == true) &&
+          ((a['effective_start_at'] ?? '').toString().isNotEmpty);
+      final bHasLive =
+          (b['has_live_time'] == true) &&
+          ((b['effective_start_at'] ?? '').toString().isNotEmpty);
+      if (aHasLive && bHasLive) {
+        return ((a['effective_start_at'] ?? '').toString()).compareTo(
+          (b['effective_start_at'] ?? '').toString(),
+        );
+      }
+      if (aHasLive != bHasLive) return aHasLive ? -1 : 1;
+      return ((a['speaker_name'] ?? '').toString()).compareTo(
+        (b['speaker_name'] ?? '').toString(),
+      );
+    });
+    return result;
+  }
+
+  String _deriveDisplayTop(
+    List<String> pointLabels,
+    List<Map<String, dynamic>> speakers,
+  ) {
+    final counts = <String, Map<String, dynamic>>{};
+    for (final speaker in speakers) {
+      final labels = [
+        ...((speaker['top_labels'] as List<dynamic>? ?? const <dynamic>[]).map(
+          (item) => item.toString(),
+        )),
+        if ((speaker['top'] ?? '').toString().isNotEmpty)
+          (speaker['top'] ?? '').toString(),
+      ].expand(_normalizeTopLabels).toList();
+      if (labels.isEmpty) continue;
+      final key = labels.join('|');
+      final current = counts[key];
+      if (current != null) {
+        current['count'] = ((current['count'] as int?) ?? 0) + 1;
+      } else {
+        counts[key] = {'labels': labels, 'count': 1};
+      }
+    }
+    final ranked = counts.values.toList()
+      ..sort(
+        (a, b) =>
+            ((b['count'] as int?) ?? 0).compareTo((a['count'] as int?) ?? 0),
+      );
+    final best = ranked.isNotEmpty ? ranked.first : null;
+    if (best != null &&
+        _sameTopNumberSequence(
+          pointLabels,
+          (best['labels'] as List<dynamic>)
+              .map((item) => item.toString())
+              .toList(),
+        )) {
+      return (best['labels'] as List<dynamic>)
+          .map((item) => item.toString())
+          .join(', ');
+    }
+    return pointLabels.join(', ');
+  }
+
+  String _formatPointRange(Map<String, dynamic>? point) {
+    if (point == null) return '—';
+    final start = _formatDateTime(
+      point['start_at']?.toString(),
+      timeOnly: true,
+    );
+    final end = _formatDateTime(point['end_at']?.toString(), timeOnly: true);
+    if (start == '—' && end == '—') return '—';
+    if (end == '—') return '$start Uhr';
+    return '$start – $end';
+  }
+
   String _hhmm(dynamic value) {
     final text = (value ?? '').toString();
     if (text.length >= 5) return text.substring(0, 5);
@@ -776,6 +1251,7 @@ class _HomeData {
     required this.latestDocument,
     required this.latestSummaryDocument,
     required this.liveInfo,
+    required this.factionSpeeches,
   });
 
   final Map<String, dynamic>? nextSlot;
@@ -784,6 +1260,7 @@ class _HomeData {
   final Map<String, dynamic>? latestDocument;
   final Map<String, dynamic>? latestSummaryDocument;
   final Map<String, dynamic>? liveInfo;
+  final List<Map<String, dynamic>> factionSpeeches;
 }
 
 class _SessionBanner extends StatelessWidget {
@@ -1214,6 +1691,310 @@ class _InfoPanelCard extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _AgendaLiveMarker extends StatelessWidget {
+  const _AgendaLiveMarker({
+    required this.currentTop,
+    required this.nextTop,
+    required this.currentRange,
+    required this.nextRange,
+    required this.effectiveAt,
+  });
+
+  final String currentTop;
+  final String nextTop;
+  final String currentRange;
+  final String nextRange;
+  final String effectiveAt;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8F4F4),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: const Color(0xFFE8E1E3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.timeline_outlined,
+                size: 18,
+                color: Color(0xFFB51C2D),
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                'Plenum live',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF1F2937),
+                ),
+              ),
+              const Spacer(),
+              Text(
+                effectiveAt == '—' ? '' : 'Stand $effectiveAt',
+                style: TextStyle(color: Colors.grey.shade700, fontSize: 12),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (currentTop != 'Keine Angabe') ...[
+            const Text(
+              'Aktuell',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              currentTop,
+              style: const TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                height: 1.25,
+              ),
+            ),
+            if (currentRange != '—') ...[
+              const SizedBox(height: 2),
+              Text(
+                currentRange,
+                style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+              ),
+            ],
+          ],
+          if (nextTop != 'Keine Angabe') ...[
+            const SizedBox(height: 10),
+            const Text(
+              'Als Nächstes',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(nextTop, style: const TextStyle(fontSize: 14, height: 1.25)),
+            if (nextRange != '—') ...[
+              const SizedBox(height: 2),
+              Text(
+                nextRange,
+                style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _AgendaPointCard extends StatelessWidget {
+  const _AgendaPointCard({
+    required this.displayTop,
+    required this.title,
+    required this.timeRange,
+    required this.isCurrent,
+    required this.isNext,
+    required this.isExpanded,
+    required this.speakerCount,
+    required this.speakers,
+    required this.onTap,
+  });
+
+  final String displayTop;
+  final String title;
+  final String timeRange;
+  final bool isCurrent;
+  final bool isNext;
+  final bool isExpanded;
+  final int speakerCount;
+  final List<Map<String, dynamic>> speakers;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(22),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(22),
+            border: Border.all(
+              color: isExpanded
+                  ? const Color(0xFF111827)
+                  : const Color(0xFFE8E1E3),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text(
+                              displayTop,
+                              style: TextStyle(
+                                color: Colors.grey.shade700,
+                                fontSize: 12,
+                                letterSpacing: 1.6,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            if (isCurrent)
+                              _MiniBadge(label: 'Aktuell', filled: true),
+                            if (isNext) _MiniBadge(label: 'Als Nächstes'),
+                            _MiniBadge(label: '$speakerCount Redner'),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          title,
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w700,
+                            height: 1.25,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        timeRange,
+                        style: TextStyle(
+                          color: Colors.grey.shade700,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Icon(
+                        isExpanded ? Icons.expand_less : Icons.expand_more,
+                        color: Colors.grey.shade600,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              if (isExpanded) ...[
+                const SizedBox(height: 14),
+                const Divider(height: 1),
+                const SizedBox(height: 14),
+                if (speakers.isEmpty)
+                  Text(
+                    'Für diesen TOP sind aktuell keine SPD-Redner erfasst.',
+                    style: TextStyle(color: Colors.grey.shade700),
+                  )
+                else
+                  ...speakers.map((speaker) {
+                    final liveTime = speaker['has_live_time'] == true
+                        ? (speaker['effective_start_at'] ?? '').toString()
+                        : '';
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF8F8F8),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFFE8E1E3)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              (speaker['speaker_name'] ?? 'Unbekannt')
+                                  .toString(),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            if (liveTime.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                'Live-Zeit: ${_AgendaFormatting.formatTime(liveTime)} Uhr',
+                                style: TextStyle(
+                                  color: Colors.grey.shade700,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    );
+                  }),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniBadge extends StatelessWidget {
+  const _MiniBadge({required this.label, this.filled = false});
+
+  final String label;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: filled ? const Color(0xFF111827) : Colors.white,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: filled ? const Color(0xFF111827) : const Color(0xFFD1D5DB),
+        ),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: filled ? Colors.white : const Color(0xFF374151),
+          fontSize: 12,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+class _AgendaFormatting {
+  static String formatTime(String value) {
+    final parsed = DateTime.tryParse(value);
+    if (parsed == null) return value;
+    final local = parsed.toLocal();
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
   }
 }
 
