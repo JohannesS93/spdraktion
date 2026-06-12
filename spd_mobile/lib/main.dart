@@ -9,6 +9,8 @@ import 'package:flutter_app_badger/flutter_app_badger.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'core/api_client.dart';
 import 'core/app_theme.dart';
@@ -158,6 +160,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
   StreamSubscription<String>? _onTokenRefreshSub;
   DateTime? _lastResumeRefreshAt;
+  _AppVersionPolicy? _appVersionPolicy;
+  bool _showSoftUpdateNotice = false;
 
   late Future<void> meFuture;
 
@@ -219,6 +223,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       return;
     }
     await _loadUnreadCount();
+    await _loadAppVersionPolicy();
 
     _initPush();
     messageStore.loadFromApi(api, userId: meStore.userIdOrThrow);
@@ -259,6 +264,41 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         stackTrace: st,
       );
     }
+  }
+
+  Future<void> _loadAppVersionPolicy() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final platform = Platform.isIOS ? 'ios' : 'android';
+      final payload =
+          await api.getJson(
+                '/me/app-version-policy',
+                query: {'platform': platform, 'current_version': info.version},
+              )
+              as Map<String, dynamic>?;
+      if (!mounted || payload == null) return;
+      final policy = _AppVersionPolicy.fromJson(payload);
+      setState(() {
+        _appVersionPolicy = policy;
+        _showSoftUpdateNotice =
+            policy.recommendedUpdate && !policy.updateRequired;
+      });
+    } catch (e, st) {
+      AppLogger.e(
+        'load app version policy failed',
+        tag: 'Update',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  Future<void> _openStoreUpdate() async {
+    final raw = _appVersionPolicy?.storeUrl ?? '';
+    if (raw.isEmpty) return;
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   Future<void> _markAllMessagesAsRead() async {
@@ -611,6 +651,26 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           const DocumentsPage(),
         ];
 
+        if (_appVersionPolicy?.updateRequired == true &&
+            _appVersionPolicy?.forceUpdate == true) {
+          return _ForceUpdatePage(
+            title: 'Update erforderlich',
+            message: _appVersionPolicy?.message.isNotEmpty == true
+                ? _appVersionPolicy!.message
+                : 'Bitte aktualisiere die App, bevor du sie weiter nutzt.',
+            currentVersion: _appVersionPolicy?.currentVersion ?? '—',
+            targetVersion:
+                _appVersionPolicy?.minRequiredVersion.isNotEmpty == true
+                ? _appVersionPolicy!.minRequiredVersion
+                : (_appVersionPolicy?.latestVersion ?? '—'),
+            onRefresh: () async {
+              await _loadAppVersionPolicy();
+              setState(() {});
+            },
+            onUpdate: _openStoreUpdate,
+          );
+        }
+
         return Scaffold(
           body: SafeArea(
             child: AnimatedBuilder(
@@ -629,9 +689,78 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 return Stack(
                   children: [
                     IndexedStack(index: index, children: pages),
-                    if (showBanner)
+                    if (_showSoftUpdateNotice && _appVersionPolicy != null)
                       Align(
                         alignment: Alignment.topCenter,
+                        child: Material(
+                          elevation: 6,
+                          child: Container(
+                            width: double.infinity,
+                            color: const Color(0xFF39424E),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(
+                                  Icons.system_update,
+                                  color: Colors.white,
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      const Text(
+                                        'Update verfügbar',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      Text(
+                                        _appVersionPolicy!.message.isNotEmpty
+                                            ? _appVersionPolicy!.message
+                                            : 'Eine neuere App-Version steht bereit.',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: _openStoreUpdate,
+                                  child: const Text(
+                                    'Update',
+                                    style: TextStyle(color: Colors.white),
+                                  ),
+                                ),
+                                IconButton(
+                                  onPressed: () {
+                                    setState(
+                                      () => _showSoftUpdateNotice = false,
+                                    );
+                                  },
+                                  icon: const Icon(
+                                    Icons.close,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (showBanner)
+                      Align(
+                        alignment:
+                            _showSoftUpdateNotice && _appVersionPolicy != null
+                            ? const Alignment(0, -0.75)
+                            : Alignment.topCenter,
                         child: Material(
                           elevation: 6,
                           child: InkWell(
@@ -815,6 +944,125 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           ),
         );
       },
+    );
+  }
+}
+
+class _AppVersionPolicy {
+  const _AppVersionPolicy({
+    required this.platform,
+    required this.currentVersion,
+    required this.latestVersion,
+    required this.minRequiredVersion,
+    required this.forceUpdate,
+    required this.storeUrl,
+    required this.message,
+    required this.updateRequired,
+    required this.recommendedUpdate,
+  });
+
+  factory _AppVersionPolicy.fromJson(Map<String, dynamic> json) {
+    return _AppVersionPolicy(
+      platform: (json['platform'] ?? '').toString(),
+      currentVersion: (json['current_version'] ?? '').toString(),
+      latestVersion: (json['latest_version'] ?? '').toString(),
+      minRequiredVersion: (json['min_required_version'] ?? '').toString(),
+      forceUpdate: json['force_update'] == true,
+      storeUrl: (json['store_url'] ?? '').toString(),
+      message: (json['message'] ?? '').toString(),
+      updateRequired: json['update_required'] == true,
+      recommendedUpdate: json['recommended_update'] == true,
+    );
+  }
+
+  final String platform;
+  final String currentVersion;
+  final String latestVersion;
+  final String minRequiredVersion;
+  final bool forceUpdate;
+  final String storeUrl;
+  final String message;
+  final bool updateRequired;
+  final bool recommendedUpdate;
+}
+
+class _ForceUpdatePage extends StatelessWidget {
+  const _ForceUpdatePage({
+    required this.title,
+    required this.message,
+    required this.currentVersion,
+    required this.targetVersion,
+    required this.onRefresh,
+    required this.onUpdate,
+  });
+
+  final String title;
+  final String message;
+  final String currentVersion;
+  final String targetVersion;
+  final Future<void> Function() onRefresh;
+  final Future<void> Function() onUpdate;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(
+                        Icons.system_update_alt,
+                        size: 40,
+                        color: Color(0xFFB51C2D),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(message),
+                      const SizedBox(height: 16),
+                      Text('Aktuelle Version: $currentVersion'),
+                      Text('Erforderliche Version: $targetVersion'),
+                      const SizedBox(height: 20),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: onUpdate,
+                              child: const Text('Zum Update'),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: onRefresh,
+                              child: const Text('Erneut prüfen'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -66,6 +66,7 @@ MAIL_IMPORT_POLL_MINUTES = int(os.environ.get("MAIL_IMPORT_POLL_MINUTES", "5"))
 PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES = int(
     os.environ.get("PARLIAMENT_REMINDER_LOOKAHEAD_MINUTES", "60")
 )
+JOHANNES_SETTINGS_EMAIL = "johannes.schaetzl.mdb@bundestag.de"
 _mail_import_worker_started = False
 _mail_import_worker_lock = threading.Lock()
 
@@ -209,6 +210,19 @@ class QuickInfoBulletCreate(BaseModel):
 class QuickInfoBulletUpdate(BaseModel):
     bullet_text: str | None = None
     sort_order: int | None = None
+
+
+class AppVersionPolicyUpdate(BaseModel):
+    ios_latest_version: str | None = None
+    ios_min_required_version: str | None = None
+    ios_force_update: bool | None = None
+    ios_store_url: str | None = None
+    ios_message: str | None = None
+    android_latest_version: str | None = None
+    android_min_required_version: str | None = None
+    android_force_update: bool | None = None
+    android_store_url: str | None = None
+    android_message: str | None = None
 
 class LoginRequest(BaseModel):
     email: str
@@ -395,6 +409,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def _startup_background_jobs():
+    ensure_app_version_policy_table()
     _start_mail_import_worker()
 
 DB_URL = os.environ.get(
@@ -1736,6 +1751,73 @@ def require_admin(authorization: str | None):
     return scope["actor"]
 
 
+def require_johannes_settings_access(authorization: str | None):
+    actor = require_admin(authorization)
+    if (actor.get("email") or "").strip().lower() != JOHANNES_SETTINGS_EMAIL:
+        raise HTTPException(status_code=403, detail="Nur Johannes kann diese Einstellung verwalten")
+    return actor
+
+
+def ensure_app_version_policy_table():
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_version_policy (
+                    platform TEXT PRIMARY KEY,
+                    latest_version TEXT,
+                    min_required_version TEXT,
+                    force_update BOOLEAN NOT NULL DEFAULT false,
+                    store_url TEXT,
+                    message TEXT,
+                    updated_by UUID REFERENCES users(id) ON DELETE SET NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO app_version_policy (platform)
+                VALUES ('ios'), ('android')
+                ON CONFLICT (platform) DO NOTHING
+                """
+            )
+            conn.commit()
+
+
+def _serialize_app_version_policy_row(row):
+    return {
+        "platform": row[0],
+        "latest_version": row[1],
+        "min_required_version": row[2],
+        "force_update": bool(row[3]),
+        "store_url": row[4],
+        "message": row[5],
+        "updated_by": str(row[6]) if row[6] else None,
+        "updated_at": row[7].isoformat() if row[7] else None,
+    }
+
+
+def _version_parts(value: str | None):
+    if not value:
+        return []
+    numbers = re.findall(r"\d+", value)
+    return [int(item) for item in numbers]
+
+
+def _compare_versions(left: str | None, right: str | None):
+    left_parts = _version_parts(left)
+    right_parts = _version_parts(right)
+    max_len = max(len(left_parts), len(right_parts))
+    left_parts.extend([0] * (max_len - len(left_parts)))
+    right_parts.extend([0] * (max_len - len(right_parts)))
+    if left_parts < right_parts:
+        return -1
+    if left_parts > right_parts:
+        return 1
+    return 0
+
+
 def ensure_temporary_pgf_grants_table():
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -2923,6 +3005,49 @@ def get_my_faction_speakers(
         "generated_at": datetime.now(EUROPE_BERLIN).isoformat(),
         "effective_at": (effective_at or datetime.now(EUROPE_BERLIN)).isoformat(),
         "speeches": _build_faction_speech_entries(parliament_payload=parliament_payload),
+    }
+
+
+@app.get("/me/app-version-policy")
+def get_my_app_version_policy(
+    platform: str = Query(...),
+    current_version: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    _resolve_actor_scope(authorization)
+    normalized_platform = platform.strip().lower()
+    if normalized_platform not in ("ios", "android"):
+        raise HTTPException(status_code=400, detail="platform must be ios or android")
+
+    ensure_app_version_policy_table()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT platform, latest_version, min_required_version, force_update, store_url, message, updated_by, updated_at
+                FROM app_version_policy
+                WHERE platform = %s
+                """,
+                (normalized_platform,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Policy not found")
+
+    policy = _serialize_app_version_policy_row(row)
+    update_required = False
+    recommended_update = False
+    if current_version:
+        min_required = policy["min_required_version"]
+        latest_version = policy["latest_version"]
+        update_required = bool(min_required) and _compare_versions(current_version, min_required) < 0
+        recommended_update = bool(latest_version) and _compare_versions(current_version, latest_version) < 0
+
+    return {
+        **policy,
+        "current_version": current_version,
+        "update_required": update_required,
+        "recommended_update": recommended_update,
     }
 
 
@@ -10992,6 +11117,81 @@ def list_quick_infos():
         }
         for r in rows
     ]
+
+
+@app.get("/admin/app-version-policy")
+def admin_get_app_version_policy(authorization: str | None = Header(default=None)):
+    require_johannes_settings_access(authorization)
+    ensure_app_version_policy_table()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT platform, latest_version, min_required_version, force_update, store_url, message, updated_by, updated_at
+                FROM app_version_policy
+                ORDER BY platform ASC
+                """
+            )
+            rows = cur.fetchall()
+
+    return {row[0]: _serialize_app_version_policy_row(row) for row in rows}
+
+
+@app.put("/admin/app-version-policy")
+def admin_update_app_version_policy(
+    payload: AppVersionPolicyUpdate,
+    authorization: str | None = Header(default=None),
+):
+    actor = require_johannes_settings_access(authorization)
+    ensure_app_version_policy_table()
+
+    updates = {
+        "ios": {
+            "latest_version": payload.ios_latest_version,
+            "min_required_version": payload.ios_min_required_version,
+            "force_update": payload.ios_force_update,
+            "store_url": payload.ios_store_url,
+            "message": payload.ios_message,
+        },
+        "android": {
+            "latest_version": payload.android_latest_version,
+            "min_required_version": payload.android_min_required_version,
+            "force_update": payload.android_force_update,
+            "store_url": payload.android_store_url,
+            "message": payload.android_message,
+        },
+    }
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            for platform, values in updates.items():
+                cur.execute(
+                    """
+                    UPDATE app_version_policy
+                    SET
+                        latest_version = COALESCE(%s, latest_version),
+                        min_required_version = COALESCE(%s, min_required_version),
+                        force_update = COALESCE(%s, force_update),
+                        store_url = COALESCE(%s, store_url),
+                        message = COALESCE(%s, message),
+                        updated_by = %s,
+                        updated_at = now()
+                    WHERE platform = %s
+                    """,
+                    (
+                        values["latest_version"],
+                        values["min_required_version"],
+                        values["force_update"],
+                        values["store_url"],
+                        values["message"],
+                        actor["id"],
+                        platform,
+                    ),
+                )
+            conn.commit()
+
+    return admin_get_app_version_policy(authorization)
 
 
 @app.get("/admin/quick-infos/topics")

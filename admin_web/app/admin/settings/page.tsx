@@ -51,6 +51,18 @@ type SlotTemplate = {
   items: SlotTemplateItem[];
 };
 
+type AppVersionPlatformPolicy = {
+  platform: "ios" | "android";
+  latest_version?: string | null;
+  min_required_version?: string | null;
+  force_update: boolean;
+  store_url?: string | null;
+  message?: string | null;
+  updated_at?: string | null;
+};
+
+const JOHANNES_INFO_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
+
 const EMPTY_TEMPLATE_ITEM_FORM = {
   weekday: "Mittwoch",
   slot_code: "",
@@ -91,6 +103,9 @@ export default function SettingsPage() {
   const [savingTemplateItemId, setSavingTemplateItemId] = useState<string | null>(null);
   const [deletingTemplateItemId, setDeletingTemplateItemId] = useState<string | null>(null);
   const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
+  const [appVersionPolicy, setAppVersionPolicy] = useState<Record<string, AppVersionPlatformPolicy>>({});
+  const [appVersionLoading, setAppVersionLoading] = useState(false);
+  const [savingAppVersionPolicy, setSavingAppVersionPolicy] = useState(false);
 
   const selectedTemplate = useMemo(
     () => slotTemplates.find((template) => template.id === selectedTemplateId) ?? null,
@@ -127,6 +142,9 @@ export default function SettingsPage() {
   useEffect(() => {
     if (!authReady || !session) return;
     void loadSlotTemplates();
+    if (session.email?.toLowerCase() === JOHANNES_INFO_EMAIL) {
+      void loadAppVersionPolicy();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authReady, session]);
 
@@ -179,6 +197,68 @@ export default function SettingsPage() {
       setError(`Fehler beim Laden der Templates: ${message}`);
     } finally {
       setTemplatesLoading(false);
+    }
+  }
+
+  async function loadAppVersionPolicy() {
+    setAppVersionLoading(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${API_BASE}/admin/app-version-policy`, { headers });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+      setAppVersionPolicy(JSON.parse(text) as Record<string, AppVersionPlatformPolicy>);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(`Fehler beim Laden des Update-Managements: ${message}`);
+    } finally {
+      setAppVersionLoading(false);
+    }
+  }
+
+  function updatePolicyDraft(platform: "ios" | "android", field: keyof AppVersionPlatformPolicy, value: string | boolean) {
+    setAppVersionPolicy((prev) => ({
+      ...prev,
+      [platform]: {
+        ...(prev[platform] ?? {}),
+        platform,
+        force_update: prev[platform]?.force_update ?? false,
+        [field]: value,
+      },
+    }));
+  }
+
+  async function saveAppVersionPolicy() {
+    setSavingAppVersionPolicy(true);
+    setError("");
+    try {
+      const headers = await getAuthHeaders();
+      const ios = appVersionPolicy.ios ?? { platform: "ios", force_update: false };
+      const android = appVersionPolicy.android ?? { platform: "android", force_update: false };
+      const res = await fetch(`${API_BASE}/admin/app-version-policy`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({
+          ios_latest_version: ios.latest_version ?? "",
+          ios_min_required_version: ios.min_required_version ?? "",
+          ios_force_update: ios.force_update ?? false,
+          ios_store_url: ios.store_url ?? "",
+          ios_message: ios.message ?? "",
+          android_latest_version: android.latest_version ?? "",
+          android_min_required_version: android.min_required_version ?? "",
+          android_force_update: android.force_update ?? false,
+          android_store_url: android.store_url ?? "",
+          android_message: android.message ?? "",
+        }),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+      setAppVersionPolicy(JSON.parse(text) as Record<string, AppVersionPlatformPolicy>);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(`Fehler beim Speichern des Update-Managements: ${message}`);
+    } finally {
+      setSavingAppVersionPolicy(false);
     }
   }
 
@@ -452,13 +532,130 @@ export default function SettingsPage() {
       title="Einstellungen"
       subtitle="Standardslot-Templates zentral verwalten."
       actions={
-        <Button className="admin-btn" variant="outline" onClick={() => void loadSlotTemplates()}>
+        <Button className="admin-btn" variant="outline" onClick={() => {
+          void loadSlotTemplates();
+          if (session.email?.toLowerCase() === JOHANNES_INFO_EMAIL) {
+            void loadAppVersionPolicy();
+          }
+        }}>
           <RefreshCw className={`mr-2 h-4 w-4 ${templatesLoading ? "animate-spin" : ""}`} />
           Aktualisieren
         </Button>
       }
     >
       {error ? <div className="admin-error">{error}</div> : null}
+
+      {session.email?.toLowerCase() === JOHANNES_INFO_EMAIL ? (
+        <Card className="admin-card">
+          <CardHeader className="admin-card-header">
+            <CardTitle className="text-base font-semibold">App-Update-Management</CardTitle>
+          </CardHeader>
+          <CardContent className="admin-section space-y-5 p-5">
+            <div className="text-sm text-slate-600">
+              Hier steuerst du, welche iPhone- und Android-Version empfohlen oder zwingend erforderlich ist.
+            </div>
+
+            <div className="grid gap-5 xl:grid-cols-2">
+              {(["ios", "android"] as const).map((platform) => {
+                const policy = appVersionPolicy[platform] ?? {
+                  platform,
+                  force_update: false,
+                  latest_version: "",
+                  min_required_version: "",
+                  store_url: "",
+                  message: "",
+                };
+
+                return (
+                  <div key={platform} className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                    <div className="mb-4">
+                      <div className="text-sm font-semibold text-slate-900">
+                        {platform === "ios" ? "iPhone / App Store" : "Android / Play Store"}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        Letzte Aenderung: {policy.updated_at ? new Date(policy.updated_at).toLocaleString("de-DE") : "noch keine"}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4">
+                      <div className="grid gap-2">
+                        <Label>Neueste Version</Label>
+                        <Input
+                          className="admin-input"
+                          placeholder="z. B. 1.0.2"
+                          value={policy.latest_version ?? ""}
+                          onChange={(e) => updatePolicyDraft(platform, "latest_version", e.target.value)}
+                        />
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Label>Minimal erforderliche Version</Label>
+                        <Input
+                          className="admin-input"
+                          placeholder="z. B. 1.0.2"
+                          value={policy.min_required_version ?? ""}
+                          onChange={(e) => updatePolicyDraft(platform, "min_required_version", e.target.value)}
+                        />
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Label>Store-URL</Label>
+                        <Input
+                          className="admin-input"
+                          placeholder={platform === "ios" ? "https://apps.apple.com/..." : "https://play.google.com/store/apps/..."}
+                          value={policy.store_url ?? ""}
+                          onChange={(e) => updatePolicyDraft(platform, "store_url", e.target.value)}
+                        />
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Label>Hinweistext in der App</Label>
+                        <Input
+                          className="admin-input"
+                          placeholder="z. B. Bitte jetzt aktualisieren."
+                          value={policy.message ?? ""}
+                          onChange={(e) => updatePolicyDraft(platform, "message", e.target.value)}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white px-3 py-3">
+                        <div>
+                          <div className="text-sm font-medium text-slate-900">Update erzwingen</div>
+                          <div className="text-xs text-slate-500">
+                            Nutzer muessen aktualisieren, bevor sie die App weiter nutzen koennen.
+                          </div>
+                        </div>
+                        <Switch
+                          checked={Boolean(policy.force_update)}
+                          onCheckedChange={(checked) => updatePolicyDraft(platform, "force_update", checked)}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex gap-3">
+              <Button
+                className="admin-btn-primary"
+                disabled={savingAppVersionPolicy || appVersionLoading}
+                onClick={() => void saveAppVersionPolicy()}
+              >
+                {savingAppVersionPolicy ? "Speichert…" : "Update-Regeln speichern"}
+              </Button>
+              <Button
+                className="admin-btn"
+                variant="outline"
+                disabled={appVersionLoading}
+                onClick={() => void loadAppVersionPolicy()}
+              >
+                {appVersionLoading ? "Laedt…" : "Neu laden"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-3">
         <Card className="admin-card">
