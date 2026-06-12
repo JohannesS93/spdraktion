@@ -2179,6 +2179,25 @@ def _point_effective_end(point: dict) -> datetime | None:
     return end_at or start_at
 
 
+def _apply_roll_call_live_timing(
+    *,
+    start_at: datetime | None,
+    end_at: datetime | None,
+    duration_minutes: int | None,
+    point: dict | None,
+) -> tuple[datetime | None, datetime | None]:
+    point_end = _point_effective_end(point or {})
+    effective_start = point_end or start_at
+    effective_end = end_at
+
+    if effective_start and duration_minutes:
+        effective_end = effective_start + timedelta(minutes=duration_minutes)
+    elif point_end and end_at and end_at < point_end:
+        effective_end = point_end
+
+    return effective_start, effective_end
+
+
 def _find_current_and_next_point(
     sessions: list[dict],
     effective_at: datetime,
@@ -4366,13 +4385,25 @@ def _build_kurzuebersicht_roll_call_events() -> list[dict]:
                     tzinfo=EUROPE_BERLIN,
                 )
                 duration_match = re.search(r"(\d+)\s*Minuten", note, re.IGNORECASE)
+                duration_minutes = int(duration_match.group(1)) if duration_match else None
+                point_for_roll_call = _find_session_point_for_top_label(
+                    top_label,
+                    entry_date.isoformat(),
+                    sessions,
+                )
+                effective_start_at, effective_end_at = _apply_roll_call_live_timing(
+                    start_at=start_at,
+                    end_at=end_at,
+                    duration_minutes=duration_minutes,
+                    point=point_for_roll_call,
+                )
                 note_roll_calls.append(
                     {
                         "top": re.sub(r"\s+", " ", top_label.upper()).strip(),
                         "title": title,
-                        "start_at": start_at,
-                        "end_at": end_at,
-                        "duration_minutes": int(duration_match.group(1)) if duration_match else None,
+                        "start_at": effective_start_at or start_at,
+                        "end_at": effective_end_at or end_at,
+                        "duration_minutes": duration_minutes,
                         "note": note,
                         "pdf_url": latest_payload["document"].get("filename"),
                         "source": "kurzuebersicht_note",
@@ -4391,12 +4422,18 @@ def _build_kurzuebersicht_roll_call_events() -> list[dict]:
 
             end_at = _point_effective_end(point) if point else None
             start_at = point.get("start_at") if point else datetime.fromisoformat(entry["start_at"])
+            effective_start_at, effective_end_at = _apply_roll_call_live_timing(
+                start_at=start_at,
+                end_at=end_at or start_at,
+                duration_minutes=None,
+                point=point,
+            )
             events.append(
                 {
                     "top": primary_top,
                     "title": title,
-                    "start_at": start_at,
-                    "end_at": end_at or start_at,
+                    "start_at": effective_start_at or start_at,
+                    "end_at": effective_end_at or end_at or start_at,
                     "duration_minutes": None,
                     "note": None,
                     "pdf_url": None,
@@ -4412,11 +4449,17 @@ def _build_kurzuebersicht_roll_call_events() -> list[dict]:
                 item.get("date"),
                 sessions,
             )
+            effective_start_at, effective_end_at = _apply_roll_call_live_timing(
+                start_at=item.get("start_at") or ((point or {}).get("start_at")),
+                end_at=item.get("end_at") or _point_effective_end(point or {}),
+                duration_minutes=item.get("duration_minutes"),
+                point=point,
+            )
             events.append(
                 {
                     **item,
-                    "start_at": item.get("start_at") or ((point or {}).get("start_at")),
-                    "end_at": item.get("end_at") or _point_effective_end(point or {}),
+                    "start_at": effective_start_at or item.get("start_at") or ((point or {}).get("start_at")),
+                    "end_at": effective_end_at or item.get("end_at") or _point_effective_end(point or {}),
                     "pdf_url": tagesordnung_payload["document"].get("filename"),
                 }
             )
