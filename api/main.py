@@ -3110,6 +3110,18 @@ def _normalize_text_key(value: str | None) -> str:
     return normalized.strip()
 
 
+def _person_name_match_keys(value: str | None) -> set[str]:
+    normalized = _normalize_text_key(value)
+    if not normalized:
+        return set()
+
+    parts = [part for part in normalized.split(" ") if part]
+    keys = {normalized}
+    if len(parts) >= 3:
+        keys.add(f"{parts[0]} {parts[-1]}")
+    return keys
+
+
 def _is_probable_kurzuebersicht_name(value: str | None) -> bool:
     haystack = _normalize_text_key(value)
     if not haystack:
@@ -4440,10 +4452,10 @@ def _build_live_speaker_lookup(parliament_payload: dict | None) -> dict[tuple[st
         if not speaker_name:
             continue
 
-        speaker_key = _normalize_text_key(speaker_name)
         for topic_number in normalized_live_topics or [live_topic_number]:
-            key = (speaker_key, topic_number)
-            lookup[key] = speaker
+            for speaker_key in _person_name_match_keys(speaker_name):
+                key = (speaker_key, topic_number)
+                lookup[key] = speaker
 
     return lookup
 
@@ -4479,9 +4491,10 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
         for speaker in entry.get("matched_speakers") or []:
             live_speaker = None
             for top_label in normalized_top_candidates:
-                live_speaker = live_speaker_lookup.get(
-                    (_normalize_text_key(speaker["name"]), top_label)
-                )
+                for speaker_key in _person_name_match_keys(speaker["name"]):
+                    live_speaker = live_speaker_lookup.get((speaker_key, top_label))
+                    if live_speaker:
+                        break
                 if live_speaker:
                     break
             speeches.append(
@@ -4505,9 +4518,10 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
         for speaker_name in entry.get("unmatched_speakers") or []:
             live_speaker = None
             for top_label in normalized_top_candidates:
-                live_speaker = live_speaker_lookup.get(
-                    (_normalize_text_key(speaker_name), top_label)
-                )
+                for speaker_key in _person_name_match_keys(speaker_name):
+                    live_speaker = live_speaker_lookup.get((speaker_key, top_label))
+                    if live_speaker:
+                        break
                 if live_speaker:
                     break
             speeches.append(
