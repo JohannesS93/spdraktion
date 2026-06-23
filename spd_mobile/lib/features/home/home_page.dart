@@ -974,9 +974,10 @@ class _HomePageState extends State<HomePage> {
 
   String _formatRollCallRange(Map<String, dynamic> point) {
     final start = _formatDateTime(point['start_at']?.toString());
-    final location = (point['location'] ?? '').toString().trim();
-    if (location.isEmpty) return start;
-    return '$start · $location';
+    final end = _formatDateTime(
+      (point['end_at'] ?? point['start_at'])?.toString(),
+    );
+    return 'Start: $start\nVoraussichtliches Ende: $end';
   }
 
   String _formatPgfDutyHeadline(Map<String, dynamic>? duty) {

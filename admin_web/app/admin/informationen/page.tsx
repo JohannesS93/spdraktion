@@ -831,7 +831,10 @@ function RollCallCard({ rollCall }: { rollCall?: RollCall | null }) {
               {pointLabel(rollCall)}
             </div>
             <div className="text-sm text-slate-500">
-              Maßgeblich: {formatDateTime(rollCall.end_at || rollCall.start_at)}
+              Start der namentlichen: {formatDateTime(rollCall.start_at)}
+            </div>
+            <div className="text-sm text-slate-500">
+              Voraussichtliches Ende der namentlichen Abstimmung: {formatDateTime(rollCall.end_at || rollCall.start_at)}
             </div>
             {rollCall.duration_minutes || rollCall.location ? (
               <div className="text-sm text-slate-500">
