@@ -120,8 +120,8 @@ class _SlotDetailPageState extends State<SlotDetailPage> {
 
   String _assignmentLabel(Map<String, dynamic> participant) {
     final value = participant['assignment_type'];
-    if (value == 'active') return 'Aktiv';
-    if (value == 'ruf') return 'Ruf';
+    if (value == 'active') return 'Aktiv · Präsenzdienst';
+    if (value == 'ruf') return 'Ruf · in der Nähe bleiben';
     return 'Nicht zugewiesen';
   }
 
