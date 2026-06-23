@@ -24,7 +24,13 @@ CREATE TABLE duty_slots (
     slot_code TEXT,
     start_time TIME,
     end_time TIME,
-    group_id UUID REFERENCES groups(id)
+    group_id UUID REFERENCES groups(id),
+    template_item_id UUID,
+    base_group_id UUID REFERENCES groups(id) ON DELETE SET NULL,
+    open_end BOOLEAN NOT NULL DEFAULT false,
+    required_active_count INTEGER,
+    required_ruf_count INTEGER,
+    full_attendance BOOLEAN NOT NULL DEFAULT false
 );
 
 -- SLOT ASSIGNMENTS
