@@ -213,19 +213,61 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
   }
 }
 
-class _QrScanPage extends StatelessWidget {
+class _QrScanPage extends StatefulWidget {
   const _QrScanPage();
+
+  @override
+  State<_QrScanPage> createState() => _QrScanPageState();
+}
+
+class _QrScanPageState extends State<_QrScanPage> {
+  final MobileScannerController controller = MobileScannerController();
+  bool handled = false;
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _handleDetect(BarcodeCapture capture) async {
+    if (handled) return;
+    final value = capture.barcodes.firstOrNull?.rawValue;
+    if (value == null || value.isEmpty) return;
+
+    handled = true;
+    await controller.stop();
+    if (!mounted) return;
+    Navigator.of(context).pop(value);
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('QR-Code scannen')),
-      body: MobileScanner(
-        onDetect: (capture) {
-          final value = capture.barcodes.firstOrNull?.rawValue;
-          if (value == null || value.isEmpty) return;
-          Navigator.of(context).pop(value);
-        },
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          MobileScanner(
+            controller: controller,
+            onDetect: (capture) {
+              void _ = _handleDetect(capture);
+            },
+          ),
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              color: Colors.black54,
+              child: const Text(
+                'QR-Code aus dem Brief in den Rahmen halten.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white, fontSize: 16),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
