@@ -5,7 +5,7 @@
 - API: `https://api.spdfraktion-intern.de`
 
 ## Vorbedingungen
-- SSH-Zugriff auf `ubuntu@130.61.45.35`
+- SSH-Zugriff auf `root@147.93.126.127`
 - Remote-Pfad: `/opt/spd-app`
 - Remote-Env vorhanden: `/opt/spd-app/deploy/.env`
 - Remote-Firebase-Secret vorhanden: `/opt/spd-app/deploy/secrets/firebase-adminsdk.json`

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_USER="${DEPLOY_REMOTE_USER:-ubuntu}"
-REMOTE_HOST="${DEPLOY_REMOTE_HOST:-130.61.45.35}"
+REMOTE_USER="${DEPLOY_REMOTE_USER:-root}"
+REMOTE_HOST="${DEPLOY_REMOTE_HOST:-147.93.126.127}"
 REMOTE_PATH="${DEPLOY_REMOTE_PATH:-/opt/spd-app}"
 SSH_KEY="${DEPLOY_SSH_KEY:-/Users/johannesbt/.ssh/id_ed25519}"
 REMOTE_DEPLOY_DIR="$REMOTE_PATH/deploy"
