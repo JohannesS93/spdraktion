@@ -1905,6 +1905,17 @@ def _assert_trusted_device(cur, *, user_id: UUID | str, device_id: str | None):
     )
 
 
+def _is_trusted_web_origin(origin: str | None, referer: str | None) -> bool:
+    text = f"{origin or ''} {referer or ''}".lower()
+    allowed_hosts = (
+        "https://spdfraktion-intern.de",
+        "https://www.spdfraktion-intern.de",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
+    return any(host in text for host in allowed_hosts)
+
+
 def _serialize_app_version_policy_row(row):
     return {
         "platform": row[0],
@@ -5216,6 +5227,8 @@ def get_me(
     email: str | None = None,
     authorization: str | None = Header(default=None),
     x_device_id: str | None = Header(default=None),
+    origin: str | None = Header(default=None),
+    referer: str | None = Header(default=None),
 ):
     actor = get_current_user_from_firebase(authorization)
     email_lookup = (email or actor["email"]).strip()
@@ -5223,6 +5236,8 @@ def get_me(
         raise HTTPException(status_code=400, detail="Email required")
     if actor["role"] not in ("admin", "pgf") and email_lookup.lower() != actor["email"].lower():
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    require_trusted_device = not _is_trusted_web_origin(origin, referer)
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -5240,7 +5255,7 @@ def get_me(
                 if not row:
                     raise HTTPException(status_code=404, detail="User not found")
 
-                if x_device_id:
+                if require_trusted_device:
                     _assert_trusted_device(cur, user_id=row[0], device_id=x_device_id)
                     conn.commit()
 
@@ -5268,7 +5283,7 @@ def get_me(
                 if not row:
                     raise HTTPException(status_code=404, detail="User not found")
 
-                if x_device_id:
+                if require_trusted_device:
                     _assert_trusted_device(cur, user_id=row[0], device_id=x_device_id)
                     conn.commit()
 
