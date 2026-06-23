@@ -19,7 +19,7 @@ CREATE TABLE groups (
 -- DUTY SLOTS
 CREATE TABLE duty_slots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    date DATE NOT NULL,
+    slot_date DATE NOT NULL,
     weekday TEXT,
     slot_code TEXT,
     start_time TIME,
