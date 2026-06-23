@@ -41,12 +41,22 @@ CREATE TABLE slot_assignments (
 );
 
 -- EXCHANGES
+CREATE TYPE exchange_mode AS ENUM ('SWAP', 'TAKEOVER');
+CREATE TYPE exchange_status AS ENUM ('OPEN', 'PENDING_CONFIRMATION', 'CONFIRMED', 'CANCELLED');
+
 CREATE TABLE exchanges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     slot_id UUID REFERENCES duty_slots(id),
+    mode exchange_mode NOT NULL DEFAULT 'SWAP',
     from_user_id UUID REFERENCES users(id),
     to_user_id UUID REFERENCES users(id),
-    status TEXT DEFAULT 'pending',
+    created_by_user_id UUID REFERENCES users(id),
+    status exchange_status NOT NULL DEFAULT 'OPEN',
+    confirmed_at TIMESTAMP WITH TIME ZONE,
+    cancelled_at TIMESTAMP WITH TIME ZONE,
+    cancel_reason TEXT,
+    from_confirmed_at TIMESTAMP WITH TIME ZONE,
+    to_confirmed_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
@@ -101,7 +111,7 @@ CREATE TABLE attendance_reminders_sent (
 -- PUSH TOKENS
 CREATE TABLE user_push_tokens (
     user_id UUID,
-    token TEXT,
+    token TEXT UNIQUE,
     platform TEXT,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
