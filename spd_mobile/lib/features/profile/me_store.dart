@@ -71,8 +71,20 @@ class MeStore extends ChangeNotifier {
       role = data['role']?.toString();
     } catch (e, st) {
       // Don't leak internal URLs / emails to end users in release builds.
-      error =
-          'Nutzerdaten konnten nicht geladen werden. Bitte Internet/VPN pruefen und erneut versuchen.';
+      final rawError = e.toString();
+      if (rawError.contains('User not found')) {
+        error =
+            'Dieser Account ist in der App noch nicht freigeschaltet. Bitte E-Mail-Adresse prüfen oder eine Onboarding-Einladung erzeugen.';
+      } else if (rawError.contains('Device not activated')) {
+        error =
+            'Dieses Gerät ist für diesen Account nicht aktiviert. Bitte den persönlichen QR-Code scannen.';
+      } else if (rawError.contains('UID mismatch')) {
+        error =
+            'Dieser Login passt nicht zum hinterlegten Account. Bitte beim Support melden.';
+      } else {
+        error =
+            'Nutzerdaten konnten nicht geladen werden. Bitte Internet/VPN prüfen und erneut versuchen.';
+      }
       AppLogger.e('LOAD ME ERROR', tag: 'MeStore', error: e, stackTrace: st);
     } finally {
       loading = false;
