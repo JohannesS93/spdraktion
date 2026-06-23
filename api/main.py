@@ -10,6 +10,8 @@ import json
 import os
 import re
 import random
+import secrets
+import hashlib
 import threading
 import time
 import unicodedata
@@ -224,6 +226,24 @@ class AppVersionPolicyUpdate(BaseModel):
     android_store_url: str | None = None
     android_message: str | None = None
 
+class OnboardingInvitationCreate(BaseModel):
+    user_id: UUID | None = None
+    expires_days: int = 60
+    replace_open: bool = True
+
+
+class OnboardingActivationVerify(BaseModel):
+    code: str
+
+
+class OnboardingActivationComplete(BaseModel):
+    code: str
+    email: str
+    password: str
+    device_id: str
+    device_name: str | None = None
+    platform: str | None = None
+
 class LoginRequest(BaseModel):
     email: str
 
@@ -410,6 +430,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup_background_jobs():
     ensure_app_version_policy_table()
+    ensure_onboarding_tables()
     _start_mail_import_worker()
 
 DB_URL = os.environ.get(
@@ -1783,6 +1804,105 @@ def ensure_app_version_policy_table():
                 """
             )
             conn.commit()
+
+
+def _normalize_activation_code(code: str | None) -> str:
+    text = (code or "").strip()
+    if not text:
+        return ""
+    if "code=" in text:
+        try:
+            from urllib.parse import parse_qs, urlparse
+
+            parsed = urlparse(text)
+            value = parse_qs(parsed.query).get("code", [""])[0]
+            if value:
+                text = value
+        except Exception:
+            pass
+    return re.sub(r"[^A-Za-z0-9_-]", "", text)
+
+
+def _hash_activation_code(code: str) -> str:
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _new_activation_code() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def ensure_onboarding_tables():
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS activation_invitations (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    token_hash TEXT UNIQUE NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    activated_at TIMESTAMPTZ,
+                    activated_device_id TEXT,
+                    created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_activation_invitations_user_id
+                ON activation_invitations(user_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS trusted_devices (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    device_id TEXT NOT NULL,
+                    device_name TEXT,
+                    platform TEXT,
+                    activated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    last_seen_at TIMESTAMPTZ,
+                    revoked_at TIMESTAMPTZ,
+                    UNIQUE (user_id, device_id)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_trusted_devices_user_id
+                ON trusted_devices(user_id)
+                """
+            )
+        conn.commit()
+
+
+def _assert_trusted_device(cur, *, user_id: UUID | str, device_id: str | None):
+    if not device_id:
+        raise HTTPException(status_code=403, detail="Device not activated")
+    cur.execute(
+        """
+        SELECT id
+        FROM trusted_devices
+        WHERE user_id = %s
+          AND device_id = %s
+          AND revoked_at IS NULL
+        """,
+        (user_id, device_id),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=403, detail="Device not activated")
+    cur.execute(
+        """
+        UPDATE trusted_devices
+        SET last_seen_at = now()
+        WHERE id = %s
+        """,
+        (row[0],),
+    )
 
 
 def _serialize_app_version_policy_row(row):
@@ -5092,7 +5212,11 @@ def admin_get_kurzuebersicht_faction_speakers(
 # Me
 # -----------------------------
 @app.get("/me")
-def get_me(email: str | None = None, authorization: str | None = Header(default=None)):
+def get_me(
+    email: str | None = None,
+    authorization: str | None = Header(default=None),
+    x_device_id: str | None = Header(default=None),
+):
     actor = get_current_user_from_firebase(authorization)
     email_lookup = (email or actor["email"]).strip()
     if not email_lookup:
@@ -5115,6 +5239,10 @@ def get_me(email: str | None = None, authorization: str | None = Header(default=
 
                 if not row:
                     raise HTTPException(status_code=404, detail="User not found")
+
+                if x_device_id:
+                    _assert_trusted_device(cur, user_id=row[0], device_id=x_device_id)
+                    conn.commit()
 
                 return {
                     "id": str(row[0]),
@@ -5140,6 +5268,10 @@ def get_me(email: str | None = None, authorization: str | None = Header(default=
                 if not row:
                     raise HTTPException(status_code=404, detail="User not found")
 
+                if x_device_id:
+                    _assert_trusted_device(cur, user_id=row[0], device_id=x_device_id)
+                    conn.commit()
+
                 return {
                     "id": str(row[0]),
                     "first_name": row[1],
@@ -5147,6 +5279,321 @@ def get_me(email: str | None = None, authorization: str | None = Header(default=
                     "group": None,
                     "role": row[3],
                 }
+
+
+@app.post("/onboarding/verify")
+def onboarding_verify(payload: OnboardingActivationVerify):
+    ensure_onboarding_tables()
+    code = _normalize_activation_code(payload.code)
+    if not code:
+        raise HTTPException(status_code=400, detail="Activation code required")
+
+    token_hash = _hash_activation_code(code)
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.id, i.status, i.expires_at, u.email, u.first_name, u.last_name
+                FROM activation_invitations i
+                JOIN users u ON u.id = i.user_id
+                WHERE i.token_hash = %s
+                """,
+                (token_hash,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Activation code not found")
+    if row[1] != "open":
+        raise HTTPException(status_code=409, detail="Activation code already used")
+    if row[2] < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="Activation code expired")
+
+    return {
+        "ok": True,
+        "email_hint": row[3],
+        "name": f"{row[4] or ''} {row[5] or ''}".strip() or None,
+    }
+
+
+@app.post("/onboarding/activate")
+def onboarding_activate(payload: OnboardingActivationComplete):
+    ensure_onboarding_tables()
+    code = _normalize_activation_code(payload.code)
+    email = _normalize_email(payload.email)
+    device_id = (payload.device_id or "").strip()
+    password = payload.password or ""
+
+    if not code or not email or not device_id:
+        raise HTTPException(status_code=400, detail="Code, email and device_id are required")
+    if len(password) < 10:
+        raise HTTPException(status_code=400, detail="Password must contain at least 10 characters")
+
+    token_hash = _hash_activation_code(code)
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT i.id, i.user_id, i.status, i.expires_at, u.email
+                FROM activation_invitations i
+                JOIN users u ON u.id = i.user_id
+                WHERE i.token_hash = %s
+                FOR UPDATE
+                """,
+                (token_hash,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Activation code not found")
+            if row[2] != "open":
+                raise HTTPException(status_code=409, detail="Activation code already used")
+            if row[3] < datetime.now(timezone.utc):
+                raise HTTPException(status_code=410, detail="Activation code expired")
+            if (row[4] or "").strip().lower() != email.lower():
+                raise HTTPException(status_code=403, detail="Email does not match activation code")
+
+            _get_firebase_app()
+            try:
+                firebase_user = firebase_auth.get_user_by_email(email)
+                firebase_auth.update_user(firebase_user.uid, password=password)
+                firebase_uid = firebase_user.uid
+            except firebase_auth.UserNotFoundError:
+                firebase_user = firebase_auth.create_user(email=email, password=password)
+                firebase_uid = firebase_user.uid
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Firebase user could not be prepared: {exc}",
+                ) from exc
+
+            cur.execute(
+                """
+                UPDATE users
+                SET firebase_uid = COALESCE(firebase_uid, %s)
+                WHERE id = %s
+                """,
+                (firebase_uid, row[1]),
+            )
+            cur.execute(
+                """
+                INSERT INTO trusted_devices (user_id, device_id, device_name, platform, last_seen_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (user_id, device_id)
+                DO UPDATE SET
+                    device_name = EXCLUDED.device_name,
+                    platform = EXCLUDED.platform,
+                    revoked_at = NULL,
+                    last_seen_at = now()
+                """,
+                (row[1], device_id, payload.device_name, payload.platform),
+            )
+            cur.execute(
+                """
+                UPDATE activation_invitations
+                SET status = 'activated',
+                    activated_at = now(),
+                    activated_device_id = %s
+                WHERE id = %s
+                """,
+                (device_id, row[0]),
+            )
+        conn.commit()
+
+    return {"ok": True, "email": email}
+
+
+@app.get("/admin/onboarding/invitations")
+def admin_list_onboarding_invitations(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    ensure_onboarding_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    i.id,
+                    i.user_id,
+                    u.email,
+                    u.first_name,
+                    u.last_name,
+                    i.status,
+                    i.expires_at,
+                    i.activated_at,
+                    i.created_at,
+                    COUNT(td.id) FILTER (WHERE td.revoked_at IS NULL) AS active_devices
+                FROM activation_invitations i
+                JOIN users u ON u.id = i.user_id
+                LEFT JOIN trusted_devices td ON td.user_id = u.id
+                GROUP BY i.id, u.email, u.first_name, u.last_name
+                ORDER BY i.created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+
+    return {
+        "items": [
+            {
+                "id": str(r[0]),
+                "user_id": str(r[1]),
+                "email": r[2],
+                "name": f"{r[3] or ''} {r[4] or ''}".strip(),
+                "status": r[5],
+                "expires_at": r[6].isoformat() if r[6] else None,
+                "activated_at": r[7].isoformat() if r[7] else None,
+                "created_at": r[8].isoformat() if r[8] else None,
+                "active_devices": int(r[9] or 0),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/admin/onboarding/invitations")
+def admin_create_onboarding_invitations(
+    payload: OnboardingInvitationCreate,
+    authorization: str | None = Header(default=None),
+):
+    actor = require_admin(authorization)
+    ensure_onboarding_tables()
+    expires_days = max(1, min(int(payload.expires_days or 60), 365))
+    expires_at = datetime.now(timezone.utc) + timedelta(days=expires_days)
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            if payload.user_id:
+                cur.execute(
+                    """
+                    SELECT id, email, first_name, last_name
+                    FROM users
+                    WHERE id = %s
+                      AND COALESCE(is_active, true) = true
+                    """,
+                    (payload.user_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, email, first_name, last_name
+                    FROM users
+                    WHERE COALESCE(is_active, true) = true
+                      AND role IN ('mdb', 'pgf')
+                    ORDER BY last_name NULLS LAST, first_name NULLS LAST, email
+                    """
+                )
+            users = cur.fetchall()
+            if not users:
+                raise HTTPException(status_code=404, detail="No matching active users found")
+
+            invitations = []
+            for user_row in users:
+                code = _new_activation_code()
+                token_hash = _hash_activation_code(code)
+                if payload.replace_open:
+                    cur.execute(
+                        """
+                        UPDATE activation_invitations
+                        SET status = 'revoked'
+                        WHERE user_id = %s
+                          AND status = 'open'
+                        """,
+                        (user_row[0],),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO activation_invitations (
+                        user_id, token_hash, expires_at, created_by_user_id
+                    )
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (user_row[0], token_hash, expires_at, actor["id"]),
+                )
+                invitation_row = cur.fetchone()
+                qr_payload = f"spdfraktion://activate?code={code}"
+                invitations.append(
+                    {
+                        "id": str(invitation_row[0]),
+                        "user_id": str(user_row[0]),
+                        "email": user_row[1],
+                        "name": f"{user_row[2] or ''} {user_row[3] or ''}".strip(),
+                        "code": code,
+                        "qr_payload": qr_payload,
+                        "expires_at": expires_at.isoformat(),
+                        "created_at": invitation_row[1].isoformat() if invitation_row[1] else None,
+                    }
+                )
+        conn.commit()
+
+    return {"items": invitations}
+
+
+@app.get("/admin/users/{user_id}/trusted-devices")
+def admin_list_trusted_devices(
+    user_id: UUID,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_onboarding_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM users WHERE id = %s", (user_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="User not found")
+            cur.execute(
+                """
+                SELECT id, device_id, device_name, platform, activated_at, last_seen_at, revoked_at
+                FROM trusted_devices
+                WHERE user_id = %s
+                ORDER BY activated_at DESC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+
+    return {
+        "items": [
+            {
+                "id": str(r[0]),
+                "device_id": r[1],
+                "device_name": r[2],
+                "platform": r[3],
+                "activated_at": r[4].isoformat() if r[4] else None,
+                "last_seen_at": r[5].isoformat() if r[5] else None,
+                "revoked_at": r[6].isoformat() if r[6] else None,
+                "is_active": r[6] is None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.post("/admin/users/{user_id}/trusted-devices/{device_id}/revoke")
+def admin_revoke_trusted_device(
+    user_id: UUID,
+    device_id: str,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_onboarding_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE trusted_devices
+                SET revoked_at = now()
+                WHERE user_id = %s
+                  AND device_id = %s
+                  AND revoked_at IS NULL
+                RETURNING id
+                """,
+                (user_id, device_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Active device not found")
+    return {"ok": True}
 
 
 # -----------------------------

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
+import 'device_activation.dart';
 import 'logger.dart';
 
 class ApiClient {
@@ -33,6 +34,11 @@ class ApiClient {
 
     if (token != null && token.isNotEmpty) {
       headers['Authorization'] = 'Bearer $token';
+    }
+
+    final deviceId = await DeviceActivationStore.getDeviceIdOrNull();
+    if (deviceId != null && deviceId.isNotEmpty) {
+      headers['X-Device-Id'] = deviceId;
     }
 
     return headers;

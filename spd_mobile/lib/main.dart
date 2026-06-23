@@ -15,8 +15,10 @@ import 'package:url_launcher/url_launcher.dart';
 import 'core/api_client.dart';
 import 'core/app_theme.dart';
 import 'core/config.dart';
+import 'core/device_activation.dart';
 import 'core/debug_overlay.dart';
 import 'core/feature_flags.dart';
+import 'features/auth/device_activation_page.dart';
 import 'core/logger.dart';
 import 'features/auth/login_page.dart';
 import 'features/home/home_page.dart';
@@ -78,8 +80,15 @@ Future<void> main() async {
   runApp(const PraesenzdienstApp());
 }
 
-class PraesenzdienstApp extends StatelessWidget {
+class PraesenzdienstApp extends StatefulWidget {
   const PraesenzdienstApp({super.key});
+
+  @override
+  State<PraesenzdienstApp> createState() => _PraesenzdienstAppState();
+}
+
+class _PraesenzdienstAppState extends State<PraesenzdienstApp> {
+  int activationReloadKey = 0;
 
   @override
   Widget build(BuildContext context) {
@@ -90,20 +99,40 @@ class PraesenzdienstApp extends StatelessWidget {
         if (!kDebugMode) return child!;
         return Stack(children: [child!, const DebugOverlay()]);
       },
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const Scaffold(
-              body: Center(child: CircularProgressIndicator()),
+      home: FutureBuilder<bool>(
+        key: ValueKey(activationReloadKey),
+        future: DeviceActivationStore.isActivated(),
+        builder: (context, activationSnap) {
+          if (activationSnap.connectionState == ConnectionState.waiting) {
+            return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          }
+
+          if (activationSnap.data != true) {
+            return DeviceActivationPage(
+              onActivated: () {
+                setState(() {
+                  activationReloadKey += 1;
+                });
+              },
             );
           }
 
-          if (snap.data == null) {
-            return const LoginPage();
-          }
+          return StreamBuilder<User?>(
+            stream: FirebaseAuth.instance.authStateChanges(),
+            builder: (context, snap) {
+              if (snap.connectionState == ConnectionState.waiting) {
+                return const Scaffold(
+                  body: Center(child: CircularProgressIndicator()),
+                );
+              }
 
-          return const AppShell();
+              if (snap.data == null) {
+                return const LoginPage();
+              }
+
+              return const AppShell();
+            },
+          );
         },
       ),
     );

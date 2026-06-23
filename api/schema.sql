@@ -116,6 +116,33 @@ CREATE TABLE user_push_tokens (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+CREATE TABLE activation_invitations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    activated_at TIMESTAMP WITH TIME ZONE,
+    activated_device_id TEXT,
+    created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_activation_invitations_user_id
+ON activation_invitations(user_id);
+
+CREATE TABLE trusted_devices (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL,
+    device_name TEXT,
+    platform TEXT,
+    activated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    last_seen_at TIMESTAMP WITH TIME ZONE,
+    revoked_at TIMESTAMP WITH TIME ZONE,
+    UNIQUE (user_id, device_id)
+);
+
 CREATE TABLE slot_templates (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
