@@ -4195,8 +4195,8 @@ def _is_probable_speaker_line(value: str) -> bool:
         return False
 
     speaker_pattern = re.compile(
-        r"^(?:Dr\.|Prof\.|Prof\. Dr\.|PStS|BM['’]?in|BM|BK|N\. N\.|[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+)"
-        r"(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’.-]+)+(?:\s*\([^)]*\))?(?:\s*\*.*)?$"
+        r"^(?:Dr\.|Prof\.|Prof\. Dr\.|PStS|BM['’‘]?in|BM|BK|N\. N\.|[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’‘.-]+)"
+        r"(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'’‘.-]+)+(?:\s*\([^)]*\))?(?:\s*\*.*)?$"
     )
     return speaker_pattern.match(candidate) is not None
 
