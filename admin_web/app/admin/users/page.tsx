@@ -3,7 +3,8 @@
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
-import { Plus, RefreshCw, Search, Pencil, KeyRound, Copy, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, Search, Pencil, KeyRound, Copy, Trash2, QrCode, Smartphone } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 
 import { AdminShell } from "@/components/admin-shell";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -48,10 +49,45 @@ type SessionUser = {
   assigned_mdb_user_id?: string | null;
 };
 
+type TrustedDevice = {
+  id: string;
+  device_id: string;
+  device_name?: string | null;
+  platform?: string | null;
+  activated_at?: string | null;
+  last_seen_at?: string | null;
+  revoked_at?: string | null;
+  is_active: boolean;
+};
+
+type CreatedInvitation = {
+  id: string;
+  user_id: string;
+  email: string;
+  name: string;
+  code: string;
+  qr_payload: string;
+  expires_at?: string | null;
+  created_at?: string | null;
+};
+
 const JOHANNES_ADMIN_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
 
 function hasFullAccess(role?: string | null, email?: string | null) {
   return role === "admin" || email?.toLowerCase() === JOHANNES_ADMIN_EMAIL;
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return "nie";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("de-DE", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export default function UsersPage() {
@@ -80,6 +116,12 @@ export default function UsersPage() {
   const [resetLinkDialogOpen, setResetLinkDialogOpen] = useState(false);
   const [resetLinkEmail, setResetLinkEmail] = useState("");
   const [resetLinkValue, setResetLinkValue] = useState("");
+  const [deviceDialogOpen, setDeviceDialogOpen] = useState(false);
+  const [deviceUser, setDeviceUser] = useState<User | null>(null);
+  const [devices, setDevices] = useState<TrustedDevice[]>([]);
+  const [loadingDevices, setLoadingDevices] = useState(false);
+  const [creatingInvitationForUserId, setCreatingInvitationForUserId] = useState<string | null>(null);
+  const [createdInvitation, setCreatedInvitation] = useState<CreatedInvitation | null>(null);
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [error, setError] = useState("");
@@ -292,6 +334,104 @@ export default function UsersPage() {
     }
   }
 
+  async function loadDevices(user: User) {
+    setLoadingDevices(true);
+    setError("");
+    setCreatedInvitation(null);
+
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${API_BASE}/admin/users/${user.id}/trusted-devices`, {
+        headers,
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(text || "Fehler beim Laden der Geräte");
+      }
+
+      const payload = JSON.parse(text) as { items?: TrustedDevice[] };
+      setDevices(Array.isArray(payload.items) ? payload.items : []);
+    } catch {
+      setError("Geräte konnten nicht geladen werden");
+      setDevices([]);
+    } finally {
+      setLoadingDevices(false);
+    }
+  }
+
+  async function openDeviceDialog(user: User) {
+    setDeviceUser(user);
+    setDeviceDialogOpen(true);
+    await loadDevices(user);
+  }
+
+  async function createInvitationForUser(user: User) {
+    setCreatingInvitationForUserId(user.id);
+    setError("");
+    setCreatedInvitation(null);
+
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${API_BASE}/admin/onboarding/invitations`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          user_id: user.id,
+          expires_days: 60,
+          replace_open: true,
+        }),
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(text || "Fehler beim Erzeugen des QR-Codes");
+      }
+
+      const payload = JSON.parse(text) as { items?: CreatedInvitation[] };
+      const invitation = Array.isArray(payload.items) ? payload.items[0] : null;
+      if (!invitation) {
+        throw new Error("Kein QR-Code erzeugt");
+      }
+
+      setCreatedInvitation(invitation);
+    } catch {
+      setError("QR-Code konnte nicht erzeugt werden");
+    } finally {
+      setCreatingInvitationForUserId(null);
+    }
+  }
+
+  async function revokeDevice(device: TrustedDevice) {
+    if (!deviceUser) return;
+    if (!window.confirm("Dieses Gerät wirklich deaktivieren? Danach muss für dieses Handy ein neuer QR-Code gescannt werden.")) return;
+
+    setError("");
+
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(
+        `${API_BASE}/admin/users/${deviceUser.id}/trusted-devices/${encodeURIComponent(device.device_id)}/revoke`,
+        {
+          method: "POST",
+          headers,
+        }
+      );
+
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(text || "Fehler beim Deaktivieren");
+      }
+
+      await loadDevices(deviceUser);
+    } catch {
+      setError("Gerät konnte nicht deaktiviert werden");
+    }
+  }
+
 
   async function deleteUser(user: User) {
     if (!window.confirm(`Nutzer "${user.first_name} ${user.last_name}" (${user.email}) wirklich löschen? Der Firebase-Zugang wird ebenfalls entfernt.`)) return;
@@ -390,7 +530,7 @@ export default function UsersPage() {
           {error && <div className="admin-error">{error}</div>}
 
           <div className="admin-table overflow-x-auto">
-            <div className="admin-table-header grid grid-cols-[1.9fr_120px_220px_150px_180px]">
+            <div className="admin-table-header grid grid-cols-[1.9fr_120px_220px_150px_230px]">
               <div>Nutzer</div>
               <div>Rolle</div>
               <div>Zugewiesen</div>
@@ -401,7 +541,7 @@ export default function UsersPage() {
             {users.map((u) => (
               <div
                 key={u.id}
-                className="admin-table-row grid grid-cols-[1.9fr_120px_220px_150px_180px]"
+                className="admin-table-row grid grid-cols-[1.9fr_120px_220px_150px_230px]"
               >
                 <div>
                   <div className="font-medium">
@@ -427,6 +567,15 @@ export default function UsersPage() {
                 </div>
 
                 <div className="flex justify-end gap-2">
+                  <Button
+                    size="icon"
+                    className="admin-btn"
+                    variant="outline"
+                    onClick={() => openDeviceDialog(u)}
+                    title="Aktivierte Geräte und QR-Code"
+                  >
+                    <Smartphone className="h-4 w-4" />
+                  </Button>
                   <Button
                     size="icon"
                     className="admin-btn"
@@ -689,6 +838,114 @@ export default function UsersPage() {
             >
               <Copy className="mr-2 h-4 w-4" />
               Link kopieren
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={deviceDialogOpen} onOpenChange={setDeviceDialogOpen}>
+        <DialogContent className="admin-dialog sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Geräte & Onboarding</DialogTitle>
+          </DialogHeader>
+
+          {deviceUser ? (
+            <div className="space-y-5 py-2">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="font-medium text-slate-950">
+                  {deviceUser.first_name} {deviceUser.last_name}
+                </div>
+                <div className="text-sm text-slate-500">{deviceUser.email}</div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  className="admin-btn-primary"
+                  onClick={() => createInvitationForUser(deviceUser)}
+                  disabled={creatingInvitationForUserId === deviceUser.id}
+                >
+                  <QrCode className="mr-2 h-4 w-4" />
+                  Neuen QR-Code erstellen
+                </Button>
+                <Button
+                  className="admin-btn"
+                  variant="outline"
+                  onClick={() => loadDevices(deviceUser)}
+                  disabled={loadingDevices}
+                >
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Geräte aktualisieren
+                </Button>
+              </div>
+
+              {createdInvitation ? (
+                <div className="grid gap-4 rounded-2xl border border-slate-200 bg-white p-5 md:grid-cols-[220px_1fr]">
+                  <div>
+                    <QRCodeSVG value={createdInvitation.qr_payload} size={190} level="M" includeMargin />
+                  </div>
+                  <div className="space-y-3">
+                    <div>
+                      <div className="font-semibold text-slate-950">Neuer persönlicher QR-Code</div>
+                      <div className="text-sm text-slate-500">
+                        Gültig bis {formatDateTime(createdInvitation.expires_at)}. Offene ältere Codes für diese Person wurden ersetzt.
+                      </div>
+                    </div>
+                    <Input className="admin-input font-mono" value={createdInvitation.code} readOnly />
+                    <Button
+                      className="admin-btn"
+                      variant="outline"
+                      onClick={async () => navigator.clipboard.writeText(createdInvitation.code)}
+                    >
+                      <Copy className="mr-2 h-4 w-4" />
+                      Code kopieren
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="space-y-3">
+                <div className="font-semibold text-slate-950">Aktivierte Geräte</div>
+                <div className="divide-y divide-slate-200 border border-slate-200 bg-white">
+                  {devices.map((device) => (
+                    <div key={device.id} className="grid gap-3 p-4 md:grid-cols-[1fr_auto] md:items-center">
+                      <div>
+                        <div className="font-medium text-slate-950">
+                          {device.device_name || "Unbenanntes Gerät"}
+                          <Badge className="ml-2" variant={device.is_active ? "secondary" : "outline"}>
+                            {device.is_active ? "aktiv" : "deaktiviert"}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-sm text-slate-500">
+                          {device.platform || "Plattform unbekannt"} · aktiviert {formatDateTime(device.activated_at)} · zuletzt {formatDateTime(device.last_seen_at)}
+                        </div>
+                        <div className="mt-1 break-all font-mono text-xs text-slate-400">{device.device_id}</div>
+                      </div>
+                      {device.is_active ? (
+                        <Button
+                          className="admin-btn"
+                          variant="outline"
+                          onClick={() => revokeDevice(device)}
+                        >
+                          Deaktivieren
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                  {!loadingDevices && devices.length === 0 ? (
+                    <div className="p-6 text-sm text-slate-500">Noch kein Gerät aktiviert.</div>
+                  ) : null}
+                  {loadingDevices ? <div className="p-6 text-sm text-slate-500">Lade Geräte...</div> : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              className="admin-btn"
+              onClick={() => setDeviceDialogOpen(false)}
+            >
+              Schließen
             </Button>
           </DialogFooter>
         </DialogContent>
