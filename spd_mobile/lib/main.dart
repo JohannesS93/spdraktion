@@ -104,7 +104,9 @@ class _PraesenzdienstAppState extends State<PraesenzdienstApp> {
         future: DeviceActivationStore.isActivated(),
         builder: (context, activationSnap) {
           if (activationSnap.connectionState == ConnectionState.waiting) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
+            return const Scaffold(
+              body: Center(child: CircularProgressIndicator()),
+            );
           }
 
           if (activationSnap.data != true) {
@@ -650,6 +652,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         });
                       },
                       child: const Text('Erneut laden'),
+                    ),
+                    const SizedBox(height: 10),
+                    TextButton(
+                      onPressed: () async {
+                        await FirebaseAuth.instance.signOut();
+                      },
+                      child: const Text('Zur Anmeldung'),
                     ),
                   ],
                 ),

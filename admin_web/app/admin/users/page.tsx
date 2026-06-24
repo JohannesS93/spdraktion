@@ -48,8 +48,10 @@ type SessionUser = {
   assigned_mdb_user_id?: string | null;
 };
 
-function hasFullAccess(role?: string | null) {
-  return role === "admin";
+const JOHANNES_ADMIN_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
+
+function hasFullAccess(role?: string | null, email?: string | null) {
+  return role === "admin" || email?.toLowerCase() === JOHANNES_ADMIN_EMAIL;
 }
 
 export default function UsersPage() {
@@ -87,7 +89,7 @@ export default function UsersPage() {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
       const localSession = getSession();
 
-      if (!firebaseUser || !localSession || !hasFullAccess(localSession.role)) {
+      if (!firebaseUser || !localSession || !hasFullAccess(localSession.role, localSession.email)) {
         clearSession();
         setSessionState(null);
         setAuthReady(true);

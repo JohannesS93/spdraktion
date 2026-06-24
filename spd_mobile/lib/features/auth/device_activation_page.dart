@@ -46,9 +46,9 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
   }
 
   Future<void> _scanCode() async {
-    final code = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const _QrScanPage()),
-    );
+    final code = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const _QrScanPage()));
     if (code == null || code.isEmpty) return;
     setState(() {
       codeController.text = _extractCode(code);
@@ -98,7 +98,11 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
       );
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw Exception(response.body.isNotEmpty ? response.body : 'Aktivierung fehlgeschlagen');
+        throw Exception(
+          response.body.isNotEmpty
+              ? response.body
+              : 'Aktivierung fehlgeschlagen',
+        );
       }
 
       await DeviceActivationStore.markActivated(email: email);
@@ -106,6 +110,54 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
         email: email,
         password: password,
       );
+      widget.onActivated();
+    } catch (e) {
+      setState(() {
+        error = e.toString().replaceFirst('Exception: ', '');
+      });
+    } finally {
+      if (mounted) {
+        setState(() => loading = false);
+      }
+    }
+  }
+
+  Future<void> _activateReviewAccess() async {
+    setState(() {
+      loading = true;
+      error = null;
+      info = null;
+    });
+
+    try {
+      final deviceId = await DeviceActivationStore.getOrCreateDeviceId();
+      final uri = Uri.parse('${AppConfig.apiBaseUrl}/onboarding/review-access');
+      final response = await http.post(
+        uri,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'device_id': deviceId,
+          'device_name': Platform.localHostname,
+          'platform': Platform.isIOS ? 'ios' : 'android',
+        }),
+      );
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception(
+          response.body.isNotEmpty
+              ? response.body
+              : 'Testzugang konnte nicht aktiviert werden',
+        );
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final email = (data['email'] ?? '').toString();
+      await DeviceActivationStore.markActivated(email: email);
+      if (!mounted) return;
+      setState(() {
+        emailController.text = email;
+        info = 'Testzugang aktiviert. Bitte mit dem Review-Account anmelden.';
+      });
       widget.onActivated();
     } catch (e) {
       setState(() {
@@ -130,7 +182,11 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Image.asset('assets/spd-logo.png', height: 72, alignment: Alignment.centerLeft),
+                  Image.asset(
+                    'assets/spd-logo.png',
+                    height: 72,
+                    alignment: Alignment.centerLeft,
+                  ),
                   const SizedBox(height: 24),
                   const Text(
                     'Gerät aktivieren',
@@ -186,12 +242,18 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
                   if (info != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
-                      child: Text(info!, style: const TextStyle(color: Colors.green)),
+                      child: Text(
+                        info!,
+                        style: const TextStyle(color: Colors.green),
+                      ),
                     ),
                   if (error != null)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 12),
-                      child: Text(error!, style: const TextStyle(color: Colors.red)),
+                      child: Text(
+                        error!,
+                        style: const TextStyle(color: Colors.red),
+                      ),
                     ),
                   FilledButton(
                     onPressed: loading ? null : _activate,
@@ -202,6 +264,18 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Text('Gerät verbinden und Passwort setzen'),
+                  ),
+                  const SizedBox(height: 14),
+                  OutlinedButton.icon(
+                    onPressed: loading ? null : _activateReviewAccess,
+                    icon: const Icon(Icons.verified_user_outlined),
+                    label: const Text('Testzugang aktivieren'),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Nur für App-Prüfung und interne Tests. Der Testzugang zeigt keine produktiven Dokumente, Dienste oder Mitteilungen.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, height: 1.3),
                   ),
                 ],
               ),

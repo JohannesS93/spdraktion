@@ -109,7 +109,7 @@
 ('b6625466-a91c-4a2a-b28e-382a8470a008','marja-liisa.völlers@bundestag.de','Marja-Liisa','Völlers','cccccccc-cccc-cccc-cccc-cccccccccccc','pgf',true),
 ('5dad0b02-80e6-4c8f-b052-e655ef88c98e','dirk.vöpel@bundestag.de','Dirk','Vöpel','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),
 ('4bd605d2-5c42-4dcb-99e2-b36f860fa5e4','ingo.vogel@bundestag.de','Ingo','Vogel','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),
-('c7626259-e112-46ba-9437-c14f53418ff3','carolin.dr.wagner@bundestag.de','Carolin','Dr. Wagner','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),
+('c7626259-e112-46ba-9437-c14f53418ff3','carolin.wagner@bundestag.de','Carolin','Dr. Wagner','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),
 ('9b7dae37-51b6-4929-8695-e4c8a9ea82e2','maja.wallstein@bundestag.de','Maja','Wallstein','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),
 ('9579e962-9e87-4886-a5a7-0cf7f7ae62f5','daniel.walter@bundestag.de','Daniel','Walter','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),
 ('6f47b34f-8ffb-4ed0-8683-e18337049e05','carmen.wegge@bundestag.de','Carmen','Wegge','cccccccc-cccc-cccc-cccc-cccccccccccc','mdb',true),

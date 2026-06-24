@@ -244,6 +244,12 @@ class OnboardingActivationComplete(BaseModel):
     device_name: str | None = None
     platform: str | None = None
 
+
+class ReviewAccessActivate(BaseModel):
+    device_id: str
+    device_name: str | None = None
+    platform: str | None = None
+
 class LoginRequest(BaseModel):
     email: str
 
@@ -1831,6 +1837,136 @@ def _new_activation_code() -> str:
     return secrets.token_urlsafe(24)
 
 
+REVIEW_APP_EMAIL = os.environ.get("REVIEW_APP_EMAIL", "apple.review@spdfraktion-intern.de").strip().lower()
+REVIEW_APP_USER_ID = "11111111-1111-4111-8111-111111111111"
+
+
+def _is_review_email(email: str | None) -> bool:
+    return (email or "").strip().lower() == REVIEW_APP_EMAIL
+
+
+def _is_review_user(user: dict | None) -> bool:
+    return bool(user and _is_review_email(user.get("email")))
+
+
+def _is_review_user_id(user_id: UUID | str | None) -> bool:
+    return str(user_id or "").lower() == REVIEW_APP_USER_ID
+
+
+def _review_live_info_payload(actor: dict) -> dict:
+    now = datetime.now(EUROPE_BERLIN)
+    session_date = now.date().isoformat()
+    current_start = now.replace(minute=0, second=0, microsecond=0)
+    current_end = current_start + timedelta(minutes=45)
+    next_end = current_end + timedelta(minutes=45)
+    return {
+        "generated_at": now.isoformat(),
+        "effective_at": now.isoformat(),
+        "session_running": True,
+        "current_session": {
+            "date": session_date,
+            "starts_at": current_start.isoformat(),
+            "ends_at": next_end.isoformat(),
+        },
+        "session_days": [
+            {
+                "date": session_date,
+                "label": now.strftime("%d.%m.%Y"),
+            }
+        ],
+        "current_top": {
+            "top": "TOP 1",
+            "title": "Beispiel-Tagesordnungspunkt für die App-Prüfung",
+            "starts_at": current_start.isoformat(),
+            "ends_at": current_end.isoformat(),
+        },
+        "next_top": {
+            "top": "TOP 2",
+            "title": "Weiterer Beispiel-Tagesordnungspunkt",
+            "starts_at": current_end.isoformat(),
+            "ends_at": next_end.isoformat(),
+        },
+        "next_roll_call": {
+            "top": "TOP 2",
+            "title": "Beispiel namentliche Abstimmung",
+            "starts_at": current_end.isoformat(),
+            "ends_at": (current_end + timedelta(minutes=20)).isoformat(),
+        },
+        "next_speech": {
+            "top": "TOP 1",
+            "title": "Beispielrede im Review-Modus",
+            "speaker_name": "Apple Review",
+            "starts_at": (current_start + timedelta(minutes=15)).isoformat(),
+        },
+        "next_speech_source": "review",
+        "next_pgf_duty": None,
+        "viewer": {
+            "user_id": actor["id"],
+            "role": actor["role"],
+            "principal_user_id": actor["id"],
+            "principal_name": "Apple Review",
+        },
+        "agenda_points": [
+            {
+                "top": "TOP 1",
+                "title": "Beispiel-Tagesordnungspunkt für die App-Prüfung",
+                "starts_at": current_start.isoformat(),
+                "ends_at": current_end.isoformat(),
+                "is_current": True,
+            },
+            {
+                "top": "TOP 2",
+                "title": "Weiterer Beispiel-Tagesordnungspunkt",
+                "starts_at": current_end.isoformat(),
+                "ends_at": next_end.isoformat(),
+                "is_next": True,
+                "has_roll_call": True,
+            },
+        ],
+    }
+
+
+def _review_faction_speeches_payload() -> dict:
+    now = datetime.now(EUROPE_BERLIN)
+    session_date = now.date().isoformat()
+    starts_at = now.replace(minute=15, second=0, microsecond=0)
+    return {
+        "generated_at": now.isoformat(),
+        "effective_at": now.isoformat(),
+        "speeches": [
+            {
+                "top": "TOP 1",
+                "top_key": "TOP 1",
+                "title": "Beispiel-Tagesordnungspunkt für die App-Prüfung",
+                "speaker_name": "Apple Review",
+                "starts_at": starts_at.isoformat(),
+                "date": session_date,
+            }
+        ],
+    }
+
+
+def _ensure_review_user(cur):
+    cur.execute(
+        """
+        INSERT INTO users (
+            id, email, first_name, last_name, role, is_active, is_mdb
+        )
+        VALUES (%s, %s, 'Apple', 'Review', 'mdb', true, true)
+        ON CONFLICT (email)
+        DO UPDATE SET
+            first_name = EXCLUDED.first_name,
+            last_name = EXCLUDED.last_name,
+            role = EXCLUDED.role,
+            is_active = true,
+            is_mdb = true
+        RETURNING id, email, first_name, last_name, role
+        """,
+        (REVIEW_APP_USER_ID, REVIEW_APP_EMAIL),
+    )
+    return cur.fetchone()
+
+
 def ensure_onboarding_tables():
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -3109,6 +3245,9 @@ def get_my_live_info(
     scope = _resolve_actor_scope(authorization)
     actor = scope["actor"]
     principal = scope["principal"]
+    if _is_review_user(actor):
+        return _review_live_info_payload(actor)
+
     effective_at = _parse_iso_datetime(at) if at else None
     payload = _build_parliament_live_payload(at=effective_at)
     comparison_at = effective_at or datetime.now(EUROPE_BERLIN)
@@ -3148,7 +3287,10 @@ def get_my_faction_speakers(
     at: str | None = Query(default=None),
     authorization: str | None = Header(default=None),
 ):
-    _resolve_actor_scope(authorization)
+    scope = _resolve_actor_scope(authorization)
+    if _is_review_user(scope["actor"]):
+        return _review_faction_speeches_payload()
+
     effective_at = _parse_iso_datetime(at) if at else None
     parliament_payload = _build_parliament_live_payload(at=effective_at)
     return {
@@ -5417,6 +5559,38 @@ def onboarding_activate(payload: OnboardingActivationComplete):
     return {"ok": True, "email": email}
 
 
+@app.post("/onboarding/review-access")
+def onboarding_review_access(payload: ReviewAccessActivate):
+    ensure_onboarding_tables()
+    device_id = (payload.device_id or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            user_row = _ensure_review_user(cur)
+            cur.execute(
+                """
+                INSERT INTO trusted_devices (user_id, device_id, device_name, platform, last_seen_at)
+                VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (user_id, device_id)
+                DO UPDATE SET
+                    device_name = EXCLUDED.device_name,
+                    platform = EXCLUDED.platform,
+                    revoked_at = NULL,
+                    last_seen_at = now()
+                """,
+                (user_row[0], device_id, payload.device_name, payload.platform),
+            )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "email": REVIEW_APP_EMAIL,
+        "name": f"{user_row[2] or ''} {user_row[3] or ''}".strip(),
+    }
+
+
 @app.get("/admin/onboarding/invitations")
 def admin_list_onboarding_invitations(authorization: str | None = Header(default=None)):
     require_admin(authorization)
@@ -5874,6 +6048,8 @@ def list_messages(
     """
     ensure_message_recipient_table()
     require_self_or_admin(user_id, authorization)
+    if _is_review_user_id(user_id):
+        return []
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -5926,6 +6102,8 @@ def latest_message(user_id: UUID = Query(...), authorization: str | None = Heade
     """
     ensure_message_recipient_table()
     require_self_or_admin(user_id, authorization)
+    if _is_review_user_id(user_id):
+        return None
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -5972,6 +6150,8 @@ def unread_message_count(user_id: UUID = Query(...), authorization: str | None =
     """
     ensure_message_recipient_table()
     require_self_or_admin(user_id, authorization)
+    if _is_review_user_id(user_id):
+        return {"unread_count": 0}
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
@@ -6772,6 +6952,8 @@ def get_my_upcoming_slots(
     authorization: str | None = Header(default=None),
 ):
     require_self_or_admin(user_id, authorization)
+    if _is_review_user_id(user_id):
+        return []
     ensure_direct_slot_assignment_schema()
 
     with psycopg.connect(DB_URL) as conn:
@@ -7844,6 +8026,8 @@ def my_exchanges(
     Optional: Filter per status.
     """
     require_self_or_admin(user_id, authorization)
+    if _is_review_user_id(user_id):
+        return []
     ensure_direct_slot_assignment_schema()
 
     with psycopg.connect(DB_URL) as conn:
@@ -7948,6 +8132,8 @@ def my_pending_exchanges(
     weil accept bereits to_confirmed_at setzt.
     """
     require_self_or_admin(user_id, authorization)
+    if _is_review_user_id(user_id):
+        return []
     ensure_direct_slot_assignment_schema()
 
     with psycopg.connect(DB_URL) as conn:
@@ -11412,6 +11598,8 @@ def admin_clear_slot_participant_override(
 @app.get("/documents")
 def list_documents(authorization: str | None = Header(default=None)):
     user = get_current_user_from_firebase(authorization)
+    if _is_review_user(user):
+        return []
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:

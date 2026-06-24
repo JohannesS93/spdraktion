@@ -89,8 +89,11 @@ function getNav(role: string): NavItem[] {
 }
 
 function getNavForSession(session: SessionUser): NavItem[] {
-  const baseNav = getNav(session.role);
+  let baseNav = getNav(session.role);
   if (session.email?.toLowerCase() === JOHANNES_INFO_EMAIL) {
+    if (!baseNav.some((item) => item.href === "/admin/users")) {
+      baseNav = [...baseNav, ...ADMIN_ONLY_NAV];
+    }
     return [...baseNav, { href: "/admin/informationen", label: "Informationen", icon: Info }];
   }
   return baseNav;
