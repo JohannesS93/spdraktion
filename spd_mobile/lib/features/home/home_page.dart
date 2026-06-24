@@ -246,7 +246,11 @@ class _HomePageState extends State<HomePage> {
             as List<dynamic>;
 
     final upcoming = upcomingRaw.map((e) => e as Map<String, dynamic>).toList();
-    final nextSlot = upcoming.isEmpty ? null : upcoming.first;
+    final activeSlots = upcoming.where((slot) {
+      final assignmentType = (slot['assignment_type'] ?? 'active').toString();
+      return assignmentType != 'ruf';
+    }).toList();
+    final nextSlot = activeSlots.isEmpty ? null : activeSlots.first;
 
     final pendingRaw =
         await api.getJson(
