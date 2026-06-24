@@ -209,13 +209,9 @@ function normalizeTopLabels(value?: string | null) {
   return Array.from(new Set(labels));
 }
 
-function topNumberOnly(label: string) {
-  return label.replace(/^ZP\s+/i, "").trim();
-}
-
 function sameTopNumberSequence(left: string[], right: string[]) {
   if (left.length !== right.length) return false;
-  return left.map(topNumberOnly).join("|") === right.map(topNumberOnly).join("|");
+  return left.join("|") === right.join("|");
 }
 
 function topSetsIntersect(left: string[], right: string[]) {

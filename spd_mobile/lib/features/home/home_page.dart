@@ -1090,17 +1090,9 @@ class _HomePageState extends State<HomePage> {
     return labels.toSet().toList();
   }
 
-  String _topNumberOnly(String label) {
-    return label
-        .replaceFirst(RegExp(r'^ZP\s+', caseSensitive: false), '')
-        .trim();
-  }
-
   bool _sameTopNumberSequence(List<String> left, List<String> right) {
     if (left.length != right.length) return false;
-    final leftKey = left.map(_topNumberOnly).join('|');
-    final rightKey = right.map(_topNumberOnly).join('|');
-    return leftKey == rightKey;
+    return left.join('|') == right.join('|');
   }
 
   bool _topSetsIntersect(List<String> left, List<String> right) {
