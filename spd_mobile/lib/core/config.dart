@@ -22,8 +22,11 @@ class AppConfig {
     // Default to the deployed backend; local dev can still override via --dart-define.
     if (Platform.isIOS) return _prodApiBaseUrl;
 
-    // Android Emulator -> Host-Mac
-    if (Platform.isAndroid) return 'http://10.0.2.2:8000';
+    // Android debug can run on both emulator and real devices. A real Pixel
+    // cannot reach the Mac via 10.0.2.2, so default to the deployed backend.
+    // Local emulator tests can still override this via:
+    // --dart-define=API_BASE_URL=http://10.0.2.2:8000
+    if (Platform.isAndroid) return _prodApiBaseUrl;
 
     // iOS Simulator -> Host-Mac
     return 'http://127.0.0.1:8000';
