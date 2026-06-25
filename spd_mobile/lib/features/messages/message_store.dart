@@ -12,6 +12,18 @@ class MessageStore extends ChangeNotifier {
 
   List<Message> get messages => List.unmodifiable(_messages);
 
+  void removeMessage(String messageId) {
+    _messages.removeWhere((m) => m.id == messageId);
+    notifyListeners();
+  }
+
+  void clearMessages() {
+    _messages.clear();
+    urgentSender = null;
+    urgentContent = null;
+    notifyListeners();
+  }
+
   void addMessage(Message message) {
     // ❗ Duplikate vermeiden
     if (_messages.any((m) => m.id == message.id)) return;
@@ -42,10 +54,7 @@ class MessageStore extends ChangeNotifier {
     AppLogger.i('LOAD FROM API START');
     try {
       final data =
-          await api.getJson(
-                '/messages',
-                query: {'user_id': userId},
-              )
+          await api.getJson('/messages', query: {'user_id': userId})
               as List<dynamic>;
 
       _messages.clear();

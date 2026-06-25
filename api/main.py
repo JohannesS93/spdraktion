@@ -3022,6 +3022,30 @@ def ensure_message_recipient_table():
                 ON pgf_message_recipients(user_id)
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pgf_message_hidden (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    message_id UUID REFERENCES pgf_messages(id) ON DELETE CASCADE,
+                    user_id UUID REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
+            cur.execute(
+                """
+                DELETE FROM pgf_message_hidden a
+                USING pgf_message_hidden b
+                WHERE a.id > b.id
+                  AND a.message_id = b.message_id
+                  AND a.user_id = b.user_id
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_pgf_message_hidden_message_user
+                ON pgf_message_hidden(message_id, user_id)
+                """
+            )
         conn.commit()
 
 

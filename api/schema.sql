@@ -79,7 +79,8 @@ CREATE TABLE pgf_message_reads (
 CREATE TABLE pgf_message_hidden (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     message_id UUID REFERENCES pgf_messages(id) ON DELETE CASCADE,
-    user_id UUID REFERENCES users(id) ON DELETE CASCADE
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE (message_id, user_id)
 );
 
 -- ATTENDANCE

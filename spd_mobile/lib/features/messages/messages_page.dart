@@ -82,7 +82,11 @@ class _MessagesPageState extends State<MessagesPage> {
                   {},
                 );
 
-                await widget.store.loadFromApi(widget.api, userId: widget.userId);
+                widget.store.clearMessages();
+                await widget.store.loadFromApi(
+                  widget.api,
+                  userId: widget.userId,
+                );
                 await widget.onMarkedRead?.call();
 
                 if (mounted) {
@@ -141,7 +145,11 @@ class _MessagesPageState extends State<MessagesPage> {
 
                       // Store nur neu laden wenn etwas geändert wurde (z.B. ausgeblendet)
                       if (changed == true) {
-                        await widget.store.loadFromApi(widget.api, userId: widget.userId);
+                        widget.store.removeMessage(m.id);
+                        await widget.store.loadFromApi(
+                          widget.api,
+                          userId: widget.userId,
+                        );
                         await widget.onMarkedRead?.call();
                       }
                     },
