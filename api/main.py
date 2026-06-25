@@ -1837,7 +1837,8 @@ def _new_activation_code() -> str:
     return secrets.token_urlsafe(24)
 
 
-REVIEW_APP_EMAIL = os.environ.get("REVIEW_APP_EMAIL", "apple.review@spdfraktion-intern.de").strip().lower()
+REVIEW_APP_EMAIL = os.environ.get("REVIEW_APP_EMAIL", "testUser@spd.de").strip()
+REVIEW_APP_PASSWORD = os.environ.get("REVIEW_APP_PASSWORD", "Test123!123").strip()
 REVIEW_APP_USER_ID = "11111111-1111-4111-8111-111111111111"
 
 
@@ -1947,22 +1948,63 @@ def _review_faction_speeches_payload() -> dict:
 
 
 def _ensure_review_user(cur):
+    _get_firebase_app()
+    firebase_uid = None
+    try:
+        existing = firebase_auth.get_user_by_email(REVIEW_APP_EMAIL)
+        firebase_auth.update_user(
+            existing.uid,
+            email=REVIEW_APP_EMAIL,
+            password=REVIEW_APP_PASSWORD,
+            display_name="Apple Review",
+            disabled=False,
+        )
+        firebase_uid = existing.uid
+    except firebase_auth.UserNotFoundError:
+        created = firebase_auth.create_user(
+            email=REVIEW_APP_EMAIL,
+            password=REVIEW_APP_PASSWORD,
+            display_name="Apple Review",
+            disabled=False,
+        )
+        firebase_uid = created.uid
+
+    cur.execute(
+        """
+        UPDATE users
+        SET email = %s,
+            first_name = 'Apple',
+            last_name = 'Review',
+            role = 'mdb',
+            is_active = true,
+            is_mdb = true,
+            firebase_uid = %s
+        WHERE id = %s
+        RETURNING id, email, first_name, last_name, role
+        """,
+        (REVIEW_APP_EMAIL, firebase_uid, REVIEW_APP_USER_ID),
+    )
+    row = cur.fetchone()
+    if row:
+        return row
+
     cur.execute(
         """
         INSERT INTO users (
-            id, email, first_name, last_name, role, is_active, is_mdb
+            id, email, first_name, last_name, role, is_active, is_mdb, firebase_uid
         )
-        VALUES (%s, %s, 'Apple', 'Review', 'mdb', true, true)
+        VALUES (%s, %s, 'Apple', 'Review', 'mdb', true, true, %s)
         ON CONFLICT (email)
         DO UPDATE SET
             first_name = EXCLUDED.first_name,
             last_name = EXCLUDED.last_name,
             role = EXCLUDED.role,
             is_active = true,
-            is_mdb = true
+            is_mdb = true,
+            firebase_uid = EXCLUDED.firebase_uid
         RETURNING id, email, first_name, last_name, role
         """,
-        (REVIEW_APP_USER_ID, REVIEW_APP_EMAIL),
+        (REVIEW_APP_USER_ID, REVIEW_APP_EMAIL, firebase_uid),
     )
     return cur.fetchone()
 
@@ -5611,6 +5653,7 @@ def onboarding_review_access(payload: ReviewAccessActivate):
     return {
         "ok": True,
         "email": REVIEW_APP_EMAIL,
+        "password": REVIEW_APP_PASSWORD,
         "name": f"{user_row[2] or ''} {user_row[3] or ''}".strip(),
     }
 

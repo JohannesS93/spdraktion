@@ -152,11 +152,20 @@ class _DeviceActivationPageState extends State<DeviceActivationPage> {
 
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       final email = (data['email'] ?? '').toString();
+      final password = (data['password'] ?? '').toString();
+      if (email.isEmpty || password.isEmpty) {
+        throw Exception('Testzugang ist unvollständig konfiguriert.');
+      }
+
       await DeviceActivationStore.markActivated(email: email);
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
       if (!mounted) return;
       setState(() {
         emailController.text = email;
-        info = 'Testzugang aktiviert. Bitte mit dem Review-Account anmelden.';
+        info = 'Testzugang aktiviert.';
       });
       widget.onActivated();
     } catch (e) {
