@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("dev.flutter.flutter-gradle-plugin")
 
-    // ✅ wird über settings.gradle.kts versioniert
+    // wird über settings.gradle.kts versioniert
     id("com.google.gms.google-services")
 }
 
@@ -17,13 +17,13 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "de.spdfraktion.intern"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     defaultConfig {
         applicationId = "de.spdfraktion.intern"
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
