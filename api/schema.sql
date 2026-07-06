@@ -7,6 +7,7 @@ CREATE TABLE users (
     first_name TEXT,
     last_name TEXT,
     role TEXT,
+    user_kind TEXT NOT NULL DEFAULT 'real',
     is_planner_exempt BOOLEAN NOT NULL DEFAULT false
 );
 

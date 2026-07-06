@@ -447,6 +447,11 @@ _DIRECT_SLOT_SCHEMA_READY = False
 ASSIGNABLE_SLOT_ROLES = ("mdb", "pgf")
 DEFAULT_REQUIRED_ACTIVE_COUNT = 24
 DEFAULT_REQUIRED_RUF_COUNT = 24
+REAL_USER_KIND_SQL = "COALESCE(user_kind, 'real') = 'real'"
+ACTIVE_REAL_USER_SQL = f"COALESCE(is_active, true) = true AND {REAL_USER_KIND_SQL}"
+ACTIVE_REAL_USER_ALIAS_SQL = (
+    "COALESCE({alias}.is_active, true) = true AND COALESCE({alias}.user_kind, 'real') = 'real'"
+)
 
 
 def _role_implies_mdb(role: str | None) -> bool:
@@ -464,6 +469,23 @@ def _effective_is_mdb(role: str | None, explicit_value: bool | None) -> bool:
 def ensure_user_mdb_schema():
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS user_kind TEXT NOT NULL DEFAULT 'real'
+                """
+            )
+            cur.execute(
+                """
+                UPDATE users
+                SET user_kind = CASE
+                    WHEN lower(email) = lower(%s) THEN 'review'
+                    WHEN lower(email) LIKE %s THEN 'real'
+                    ELSE 'test'
+                END
+                """,
+                (REVIEW_APP_EMAIL, "%@bundestag.de"),
+            )
             cur.execute(
                 """
                 ALTER TABLE users
@@ -1976,6 +1998,7 @@ def _ensure_review_user(cur):
             first_name = 'Apple',
             last_name = 'Review',
             role = 'mdb',
+            user_kind = 'review',
             is_active = true,
             is_mdb = true,
             firebase_uid = %s
@@ -1991,14 +2014,15 @@ def _ensure_review_user(cur):
     cur.execute(
         """
         INSERT INTO users (
-            id, email, first_name, last_name, role, is_active, is_mdb, firebase_uid
+            id, email, first_name, last_name, role, user_kind, is_active, is_mdb, firebase_uid
         )
-        VALUES (%s, %s, 'Apple', 'Review', 'mdb', true, true, %s)
+        VALUES (%s, %s, 'Apple', 'Review', 'mdb', 'review', true, true, %s)
         ON CONFLICT (email)
         DO UPDATE SET
             first_name = EXCLUDED.first_name,
             last_name = EXCLUDED.last_name,
             role = EXCLUDED.role,
+            user_kind = 'review',
             is_active = true,
             is_mdb = true,
             firebase_uid = EXCLUDED.firebase_uid
@@ -2953,6 +2977,7 @@ def _admin_user_row_to_dict(r):
         "is_faction_staff": bool(r[8]),
         "is_active": bool(r[9]),
         "is_planner_exempt": bool(r[10]) if len(r) > 10 else False,
+        "user_kind": r[11] if len(r) > 11 and r[11] else "real",
     }
 
 
@@ -3578,13 +3603,14 @@ def _format_kurzuebersicht_title(stand: datetime) -> str:
 
 
 def _all_active_user_ids() -> list[str]:
+    ensure_user_mdb_schema()
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT id::text
                 FROM users
-                WHERE COALESCE(is_active, true) = true
+                WHERE {ACTIVE_REAL_USER_SQL}
                 ORDER BY
                     COALESCE(last_name, '') ASC,
                     COALESCE(first_name, '') ASC,
@@ -3596,15 +3622,16 @@ def _all_active_user_ids() -> list[str]:
 
 def _resolve_document_recipient_ids(scope: str) -> list[str]:
     normalized_scope = (scope or "").strip().lower()
+    ensure_user_mdb_schema()
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             if normalized_scope == "all":
                 cur.execute(
-                    """
+                    f"""
                     SELECT id::text
                     FROM users
-                    WHERE COALESCE(is_active, true) = true
+                    WHERE {ACTIVE_REAL_USER_SQL}
                     ORDER BY
                         COALESCE(last_name, '') ASC,
                         COALESCE(first_name, '') ASC,
@@ -3613,10 +3640,10 @@ def _resolve_document_recipient_ids(scope: str) -> list[str]:
                 )
             elif normalized_scope == "mdb":
                 cur.execute(
-                    """
+                    f"""
                     SELECT id::text
                     FROM users
-                    WHERE COALESCE(is_active, true) = true
+                    WHERE {ACTIVE_REAL_USER_SQL}
                       AND (
                         role = 'mdb'
                         OR COALESCE(is_mdb, false) = true
@@ -3629,10 +3656,10 @@ def _resolve_document_recipient_ids(scope: str) -> list[str]:
                 )
             elif normalized_scope == "pgf":
                 cur.execute(
-                    """
+                    f"""
                     SELECT id::text
                     FROM users
-                    WHERE COALESCE(is_active, true) = true
+                    WHERE {ACTIVE_REAL_USER_SQL}
                       AND role = 'pgf'
                     ORDER BY
                         COALESCE(last_name, '') ASC,
@@ -4275,10 +4302,11 @@ def _clean_kurzuebersicht_speaker_name(value: str) -> str:
 
 
 def _load_name_directory() -> dict[str, dict]:
+    ensure_user_mdb_schema()
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     id::text,
                     first_name,
@@ -4286,12 +4314,12 @@ def _load_name_directory() -> dict[str, dict]:
                     email,
                     role
                 FROM users
-                WHERE COALESCE(is_active, true) = true
+                WHERE {ACTIVE_REAL_USER_SQL}
                 ORDER BY
                     COALESCE(last_name, '') ASC,
                     COALESCE(first_name, '') ASC,
                     email ASC
-                """
+                f"""
             )
             rows = cur.fetchall()
 
@@ -5092,17 +5120,18 @@ def _record_parliament_reminder_sent(
 
 
 def _push_targets_for_active_users() -> list[tuple[str, list[str]]]:
+    ensure_user_mdb_schema()
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     u.id::text,
                     array_agg(DISTINCT upt.token ORDER BY upt.token) AS tokens
                 FROM users u
                 JOIN user_push_tokens upt
                   ON upt.user_id = u.id
-                WHERE COALESCE(u.is_active, true) = true
+                WHERE {ACTIVE_REAL_USER_ALIAS_SQL.format(alias="u")}
                 GROUP BY u.id
                 """
             )
@@ -5711,6 +5740,7 @@ def admin_create_onboarding_invitations(
 ):
     actor = require_admin(authorization)
     ensure_onboarding_tables()
+    ensure_user_mdb_schema()
     expires_days = max(1, min(int(payload.expires_days or 60), 365))
     expires_at = datetime.now(timezone.utc) + timedelta(days=expires_days)
 
@@ -5718,20 +5748,20 @@ def admin_create_onboarding_invitations(
         with conn.cursor() as cur:
             if payload.user_id:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, email, first_name, last_name
                     FROM users
                     WHERE id = %s
-                      AND COALESCE(is_active, true) = true
+                      AND {ACTIVE_REAL_USER_SQL}
                     """,
                     (payload.user_id,),
                 )
             else:
                 cur.execute(
-                    """
+                    f"""
                     SELECT id, email, first_name, last_name
                     FROM users
-                    WHERE COALESCE(is_active, true) = true
+                    WHERE {ACTIVE_REAL_USER_SQL}
                       AND role IN ('mdb', 'pgf')
                     ORDER BY last_name NULLS LAST, first_name NULLS LAST, email
                     """
@@ -8612,13 +8642,14 @@ def admin_list_users(
     role: str | None = None,
     q: str | None = None,
     is_mdb: bool | None = None,
+    include_test_users: bool = False,
 ):
     require_admin(authorization)
     ensure_user_mdb_schema()
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     u.id,
                     u.email,
@@ -8633,11 +8664,13 @@ def admin_list_users(
                     END AS assigned_mdb_name,
                     COALESCE(u.is_faction_staff, false) AS is_faction_staff,
                     COALESCE(u.is_active, true) AS is_active,
-                    COALESCE(u.is_planner_exempt, false) AS is_planner_exempt
+                    COALESCE(u.is_planner_exempt, false) AS is_planner_exempt,
+                    COALESCE(u.user_kind, 'real') AS user_kind
                 FROM users u
                 LEFT JOIN users m
                     ON m.id = u.assigned_mdb_user_id
-                WHERE (%s::text IS NULL OR u.role = %s::text)
+                WHERE (%s::boolean = true OR COALESCE(u.user_kind, 'real') = 'real')
+                  AND (%s::text IS NULL OR u.role = %s::text)
                   AND (%s::boolean IS NULL OR COALESCE(u.is_mdb, false) = %s::boolean)
                   AND (
                         %s::text IS NULL
@@ -8648,6 +8681,7 @@ def admin_list_users(
                 ORDER BY u.last_name NULLS LAST, u.first_name NULLS LAST, u.email
                 """,
                 (
+                    include_test_users,
                     role, role,
                     is_mdb, is_mdb,
                     q,
@@ -10396,7 +10430,7 @@ def _load_planner_week_context(cur, week_start: date):
     week_end = max(slot.slot_date for slot in slots)
 
     cur.execute(
-        """
+        f"""
         SELECT
             u.id,
             u.email,
@@ -10412,7 +10446,7 @@ def _load_planner_week_context(cur, week_start: date):
         FROM users u
         LEFT JOIN planner_person_stats ps
           ON ps.user_id = u.id
-        WHERE COALESCE(u.is_active, true) = true
+        WHERE {ACTIVE_REAL_USER_ALIAS_SQL.format(alias="u")}
           AND COALESCE(u.is_mdb, false) = true
         ORDER BY u.last_name NULLS LAST, u.first_name NULLS LAST, u.email ASC
         """
@@ -11555,7 +11589,7 @@ def admin_slot_participants(
                 LEFT JOIN slot_assignments sa
                   ON sa.slot_id = %s
                  AND sa.user_id = u.id
-                WHERE COALESCE(u.is_active, true) = true
+                WHERE {ACTIVE_REAL_USER_ALIAS_SQL.format(alias="u")}
                   AND COALESCE(u.is_mdb, false) = true
                 ORDER BY u.last_name NULLS LAST, u.first_name NULLS LAST, u.email
                 """,
