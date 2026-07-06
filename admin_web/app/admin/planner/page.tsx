@@ -458,11 +458,9 @@ export default function PlannerPage() {
       const isEmptyWeek = assignmentCount === 0;
 
       const passesRange =
-        weekFilter === "all"
-          ? true
-          : weekFilter === "empty"
-            ? isEmptyWeek
-            : isCurrentOrUpcoming;
+        weekFilter === "empty"
+          ? isCurrentOrUpcoming && isEmptyWeek
+          : isCurrentOrUpcoming;
 
       if (!passesRange && !isSelected) return false;
 
@@ -1344,7 +1342,7 @@ export default function PlannerPage() {
                                 : "border-slate-200 bg-white text-slate-700 hover:border-slate-300",
                             ].join(" ")}
                           >
-                            Alle Wochen
+                            Alle kommenden Wochen
                           </button>
                           <button
                             type="button"
