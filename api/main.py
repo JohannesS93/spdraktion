@@ -4319,7 +4319,7 @@ def _load_name_directory() -> dict[str, dict]:
                     COALESCE(last_name, '') ASC,
                     COALESCE(first_name, '') ASC,
                     email ASC
-                f"""
+                """
             )
             rows = cur.fetchall()
 
