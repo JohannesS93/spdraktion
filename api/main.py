@@ -4653,12 +4653,13 @@ def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: 
     if not parliament_payload:
         return None
 
+    entry_date = entry.get("date")
     top_labels = {
         normalized
         for label in (entry.get("top_labels") or [])
         for normalized in _normalize_parliament_top_labels(label)
     }
-    if not top_labels:
+    if not top_labels or not entry_date:
         return None
 
     candidates = []
@@ -4669,6 +4670,9 @@ def _match_live_point_for_kurzuebersicht_entry(entry: dict, parliament_payload: 
     candidates.extend(parliament_payload.get("agenda_points") or [])
 
     for point in candidates:
+        point_start = _parse_iso_datetime(point.get("start_at")) if point.get("start_at") else None
+        if point_start is None or point_start.date().isoformat() != entry_date:
+            continue
         point_labels = set(_normalize_parliament_top_labels(point.get("top")))
         if point_labels & top_labels:
             return point
