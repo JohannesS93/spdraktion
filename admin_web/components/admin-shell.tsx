@@ -10,6 +10,7 @@ import {
   CalendarDays,
   ArrowLeftRight,
   Bell,
+  ClipboardList,
   FileText,
   Lightbulb,
   Info,
@@ -72,6 +73,7 @@ const JOHANNES_INFO_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
 
 const ADMIN_ONLY_NAV: NavItem[] = [
   { href: "/admin/users", label: "Nutzer", icon: Users },
+  { href: "/admin/speech-control", label: "KÜ & Reden", icon: ClipboardList },
 ];
 
 const MDB_NAV: NavItem[] = [

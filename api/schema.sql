@@ -110,6 +110,22 @@ CREATE TABLE attendance_reminders_sent (
     sent_at TIMESTAMP WITH TIME ZONE DEFAULT now()
 );
 
+CREATE TABLE manual_speeches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    speaker_name TEXT NOT NULL,
+    speech_date DATE NOT NULL,
+    start_time TIME NOT NULL,
+    top_label TEXT NOT NULL,
+    title TEXT NOT NULL,
+    notes TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+);
+
+CREATE INDEX manual_speeches_date_idx ON manual_speeches (speech_date, start_time);
+
 -- PUSH TOKENS
 CREATE TABLE user_push_tokens (
     user_id UUID,

@@ -226,6 +226,18 @@ class AppVersionPolicyUpdate(BaseModel):
     android_store_url: str | None = None
     android_message: str | None = None
 
+
+class ManualSpeechPayload(BaseModel):
+    user_id: UUID | None = None
+    speaker_name: str
+    date: date
+    start_time: str
+    top: str
+    title: str
+    notes: str | None = None
+    is_active: bool = True
+
+
 class OnboardingInvitationCreate(BaseModel):
     user_id: UUID | None = None
     expires_days: int = 60
@@ -437,6 +449,7 @@ app.add_middleware(
 def _startup_background_jobs():
     ensure_app_version_policy_table()
     ensure_onboarding_tables()
+    ensure_manual_speech_tables()
     _start_mail_import_worker()
 
 DB_URL = os.environ.get(
@@ -3462,6 +3475,35 @@ def ensure_mail_import_tables():
         conn.commit()
 
 
+def ensure_manual_speech_tables():
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manual_speeches (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+                    speaker_name TEXT NOT NULL,
+                    speech_date DATE NOT NULL,
+                    start_time TIME NOT NULL,
+                    top_label TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    notes TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS manual_speeches_date_idx
+                ON manual_speeches (speech_date, start_time)
+                """
+            )
+        conn.commit()
+
+
 def _decode_mime_header(value: str | None) -> str:
     if not value:
         return ""
@@ -4129,6 +4171,15 @@ def run_mail_import_once():
                 mime_type = part.get_content_type() or "application/octet-stream"
                 prepared_items = _prepare_mail_attachment(subject, filename, payload, mime_type)
                 if not prepared_items:
+                    _record_mail_import_event(
+                        mailbox_uid=mailbox_uid,
+                        message_id=message_id,
+                        subject=subject,
+                        attachment_name=filename,
+                        attachment_category="unsupported",
+                        document_id=None,
+                        skip_reason="no_supported_document_found",
+                    )
                     continue
 
                 for prepared in prepared_items:
@@ -4485,6 +4536,74 @@ def _build_latest_kurzuebersicht_payload() -> dict | None:
         },
         "entries": enriched_entries,
     }
+
+
+def _manual_speech_start_at(row_date: date, row_time) -> datetime:
+    return datetime.combine(row_date, row_time, tzinfo=EUROPE_BERLIN)
+
+
+def _serialize_manual_speech_row(row) -> dict:
+    start_at = _manual_speech_start_at(row[3], row[4])
+    return {
+        "id": str(row[0]),
+        "user_id": str(row[1]) if row[1] else None,
+        "speaker_name": row[2],
+        "date": row[3].isoformat() if row[3] else None,
+        "start_time": row[4].strftime("%H:%M") if row[4] else None,
+        "top": row[5],
+        "top_labels": _normalize_parliament_top_labels(row[5]),
+        "title": row[6],
+        "notes": row[7],
+        "is_active": bool(row[8]),
+        "created_at": row[9].isoformat() if row[9] else None,
+        "updated_at": row[10].isoformat() if row[10] else None,
+        "planned_start_at": start_at.isoformat(),
+        "effective_start_at": start_at.isoformat(),
+        "source": "manual",
+    }
+
+
+def _load_manual_speech_entries(include_inactive: bool = False) -> list[dict]:
+    ensure_manual_speech_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    ms.id,
+                    ms.user_id,
+                    COALESCE(
+                        NULLIF(TRIM(ms.speaker_name), ''),
+                        NULLIF(TRIM(COALESCE(u.first_name, '') || ' ' || COALESCE(u.last_name, '')), ''),
+                        u.email
+                    ) AS speaker_name,
+                    ms.speech_date,
+                    ms.start_time,
+                    ms.top_label,
+                    ms.title,
+                    ms.notes,
+                    ms.is_active,
+                    ms.created_at,
+                    ms.updated_at,
+                    u.email,
+                    u.role
+                FROM manual_speeches ms
+                LEFT JOIN users u
+                  ON u.id = ms.user_id
+                WHERE (%s::boolean = true OR ms.is_active = true)
+                ORDER BY ms.speech_date ASC, ms.start_time ASC, ms.top_label ASC, speaker_name ASC
+                """,
+                (include_inactive,),
+            )
+            rows = cur.fetchall()
+
+    entries = []
+    for row in rows:
+        item = _serialize_manual_speech_row(row)
+        item["email"] = row[11]
+        item["role"] = row[12]
+        entries.append(item)
+    return entries
 
 
 def _parse_ausgezeichnete_tagesordnung_roll_calls(pdf_bytes: bytes) -> list[dict]:
@@ -4876,13 +4995,11 @@ def _build_live_speaker_lookup(parliament_payload: dict | None) -> dict[tuple[st
 
 def _build_faction_speech_entries(parliament_payload: dict | None = None) -> list[dict]:
     latest_payload = _build_latest_kurzuebersicht_payload()
-    if not latest_payload:
-        return []
 
     sessions = _parse_bundestag_conferences()
     live_speaker_lookup = _build_live_speaker_lookup(parliament_payload)
     speeches: list[dict] = []
-    for entry in latest_payload["entries"]:
+    for entry in (latest_payload or {}).get("entries") or []:
         session_point = _find_session_point_for_kurzuebersicht_entry(entry, sessions)
         live_point = _match_live_point_for_kurzuebersicht_entry(entry, parliament_payload)
         effective_start_value = (
@@ -4927,6 +5044,7 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
                     "has_live_time": live_speaker is not None and live_speaker.get("start_at") is not None,
                     "live_state": live_speaker.get("state") if live_speaker else None,
                     "notes": entry.get("notes") or [],
+                    "source": "kurzuebersicht",
                 }
             )
         for speaker_name in entry.get("unmatched_speakers") or []:
@@ -4954,8 +5072,31 @@ def _build_faction_speech_entries(parliament_payload: dict | None = None) -> lis
                     "has_live_time": live_speaker is not None and live_speaker.get("start_at") is not None,
                     "live_state": live_speaker.get("state") if live_speaker else None,
                     "notes": entry.get("notes") or [],
+                    "source": "kurzuebersicht",
                 }
             )
+
+    for manual in _load_manual_speech_entries(include_inactive=False):
+        speeches.append(
+            {
+                "id": manual["id"],
+                "user_id": manual["user_id"],
+                "speaker_name": manual["speaker_name"],
+                "source_speaker_name": manual["speaker_name"],
+                "role": manual.get("role"),
+                "email": manual.get("email"),
+                "top_labels": manual["top_labels"],
+                "top": manual["top"],
+                "title": manual["title"],
+                "planned_start_at": manual["planned_start_at"],
+                "effective_start_at": manual["effective_start_at"],
+                "live_matched": False,
+                "has_live_time": False,
+                "live_state": None,
+                "notes": [manual["notes"]] if manual.get("notes") else [],
+                "source": "manual",
+            }
+        )
 
     speeches.sort(
         key=lambda item: (
@@ -5459,6 +5600,207 @@ def admin_get_kurzuebersicht_faction_speakers(
         "effective_at": (effective_at or datetime.now(EUROPE_BERLIN)).isoformat(),
         "speeches": _build_faction_speech_entries(parliament_payload=parliament_payload),
     }
+
+
+def _parse_manual_speech_time(value: str):
+    cleaned = (value or "").strip()
+    try:
+        return datetime.strptime(cleaned, "%H:%M").time()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="start_time must use HH:MM") from exc
+
+
+def _latest_mail_import_events(limit: int = 20) -> list[dict]:
+    ensure_mail_import_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT mailbox_uid, subject, attachment_name, attachment_category, skip_reason, imported_at, document_id
+                FROM mail_import_events
+                ORDER BY imported_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "mailbox_uid": row[0],
+            "subject": row[1],
+            "attachment_name": row[2],
+            "attachment_category": row[3],
+            "skip_reason": row[4],
+            "imported_at": row[5].isoformat() if row[5] else None,
+            "document_id": str(row[6]) if row[6] else None,
+        }
+        for row in rows
+    ]
+
+
+@app.get("/admin/speech-control/status")
+def admin_speech_control_status(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    latest_payload = _build_latest_kurzuebersicht_payload()
+    sessions = _parse_bundestag_conferences()
+    today = datetime.now(EUROPE_BERLIN).date()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    latest_entry_dates = []
+    if latest_payload:
+        for entry in latest_payload.get("entries") or []:
+            entry_date = entry.get("date")
+            if entry_date:
+                latest_entry_dates.append(entry_date)
+    latest_dates = sorted(set(latest_entry_dates))
+    is_current_week = any(
+        week_start <= date.fromisoformat(item) <= week_end
+        for item in latest_dates
+    )
+
+    manual_entries = _load_manual_speech_entries(include_inactive=True)
+    manual_active_count = sum(1 for item in manual_entries if item.get("is_active"))
+
+    return {
+        "generated_at": datetime.now(EUROPE_BERLIN).isoformat(),
+        "week_start": week_start.isoformat(),
+        "week_end": week_end.isoformat(),
+        "latest_kurzuebersicht": latest_payload.get("document") if latest_payload else None,
+        "latest_kurzuebersicht_dates": latest_dates,
+        "latest_kurzuebersicht_is_current_week": is_current_week,
+        "session_days": [
+            {
+                "date": session.get("date").isoformat() if session.get("date") else None,
+                "date_text": session.get("date_text"),
+                "name": session.get("name"),
+                "active": bool(session.get("active")),
+            }
+            for session in sessions
+            if session.get("date")
+        ],
+        "mail_import_enabled": _mail_import_enabled(),
+        "mail_import_username": MAIL_IMPORT_USERNAME or None,
+        "mail_import_lookback_days": MAIL_IMPORT_LOOKBACK_DAYS,
+        "mail_import_events": _latest_mail_import_events(),
+        "manual_speech_count": len(manual_entries),
+        "manual_active_speech_count": manual_active_count,
+    }
+
+
+@app.get("/admin/speech-control/speeches")
+def admin_list_manual_speeches(authorization: str | None = Header(default=None)):
+    require_admin(authorization)
+    return _load_manual_speech_entries(include_inactive=True)
+
+
+@app.post("/admin/speech-control/speeches")
+def admin_create_manual_speech(
+    payload: ManualSpeechPayload,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_manual_speech_tables()
+    start_time = _parse_manual_speech_time(payload.start_time)
+    speaker_name = payload.speaker_name.strip()
+    top = payload.top.strip()
+    title = payload.title.strip()
+    if not speaker_name:
+        raise HTTPException(status_code=400, detail="speaker_name is required")
+    if not top:
+        raise HTTPException(status_code=400, detail="top is required")
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO manual_speeches (
+                    user_id, speaker_name, speech_date, start_time, top_label, title, notes, is_active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    payload.user_id,
+                    speaker_name,
+                    payload.date,
+                    start_time,
+                    top,
+                    title,
+                    payload.notes,
+                    payload.is_active,
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return {"id": str(row[0])}
+
+
+@app.put("/admin/speech-control/speeches/{speech_id}")
+def admin_update_manual_speech(
+    speech_id: UUID,
+    payload: ManualSpeechPayload,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_manual_speech_tables()
+    start_time = _parse_manual_speech_time(payload.start_time)
+    speaker_name = payload.speaker_name.strip()
+    top = payload.top.strip()
+    title = payload.title.strip()
+    if not speaker_name or not top or not title:
+        raise HTTPException(status_code=400, detail="speaker_name, top and title are required")
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE manual_speeches
+                SET user_id = %s,
+                    speaker_name = %s,
+                    speech_date = %s,
+                    start_time = %s,
+                    top_label = %s,
+                    title = %s,
+                    notes = %s,
+                    is_active = %s,
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (
+                    payload.user_id,
+                    speaker_name,
+                    payload.date,
+                    start_time,
+                    top,
+                    title,
+                    payload.notes,
+                    payload.is_active,
+                    speech_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Manual speech not found")
+        conn.commit()
+    return {"ok": True}
+
+
+@app.delete("/admin/speech-control/speeches/{speech_id}")
+def admin_delete_manual_speech(
+    speech_id: UUID,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_manual_speech_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM manual_speeches WHERE id = %s", (speech_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Manual speech not found")
+        conn.commit()
+    return {"ok": True}
 
 # -----------------------------
 # Me
