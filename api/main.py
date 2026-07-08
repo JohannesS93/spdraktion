@@ -3563,7 +3563,7 @@ def _extract_pdf_page_texts(pdf_bytes: bytes) -> list[str]:
     return [page.extract_text() or "" for page in reader.pages]
 
 
-def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
+def _parse_kurzuebersicht_stand_info(value: str | None) -> tuple[datetime, bool] | None:
     if not value:
         return None
 
@@ -3584,7 +3584,7 @@ def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
     }
 
     match = re.search(
-        r"Stand:\s*(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]+)\s*(\d{4}),\s*(\d{1,2})[:.](\d{2})\s*Uhr",
+        r"Stand:\s*(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]+)\s*(\d{4})(?:,\s*(\d{1,2})[:.](\d{2})\s*Uhr)?",
         value,
         flags=re.IGNORECASE,
     )
@@ -3596,14 +3596,21 @@ def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
     if not month:
         return None
 
-    return datetime(
+    has_time = match.group(4) is not None and match.group(5) is not None
+    stand = datetime(
         int(match.group(3)),
         month,
         int(match.group(1)),
-        int(match.group(4)),
-        int(match.group(5)),
+        int(match.group(4) or 0),
+        int(match.group(5) or 0),
         tzinfo=EUROPE_BERLIN,
     )
+    return stand, has_time
+
+
+def _parse_kurzuebersicht_stand(value: str | None) -> datetime | None:
+    parsed = _parse_kurzuebersicht_stand_info(value)
+    return parsed[0] if parsed else None
 
 
 def _extract_kurzuebersicht_header_metadata(text: str) -> dict | None:
@@ -3613,18 +3620,20 @@ def _extract_kurzuebersicht_header_metadata(text: str) -> dict | None:
         normalized_text,
         flags=re.IGNORECASE,
     )
-    stand = _parse_kurzuebersicht_stand(normalized_text)
-    if not title_match or stand is None:
+    stand_info = _parse_kurzuebersicht_stand_info(normalized_text)
+    if not title_match or stand_info is None:
         return None
 
+    stand, has_time = stand_info
     title_line = re.sub(r"\s+", " ", title_match.group(0)).strip()
     return {
         "title_line": title_line,
         "stand": stand,
+        "stand_has_time": has_time,
     }
 
 
-def _format_kurzuebersicht_title(stand: datetime) -> str:
+def _format_kurzuebersicht_title(stand: datetime, *, include_time: bool = True) -> str:
     month_names = {
         1: "Jan",
         2: "Feb",
@@ -3641,6 +3650,8 @@ def _format_kurzuebersicht_title(stand: datetime) -> str:
     }
     calendar_week = stand.isocalendar().week
     month_label = month_names.get(stand.month, f"{stand.month:02d}")
+    if not include_time:
+        return f"KÜ {calendar_week} Stand {stand.day:02d}-{month_label}"
     return f"KÜ {calendar_week} Stand {stand.day:02d}-{month_label} {stand.hour:02d}Uhr"
 
 
@@ -3880,7 +3891,7 @@ def _load_latest_kurzuebersicht_stand() -> datetime | None:
         return None
 
     title = document.get("title") or ""
-    title_match = re.search(r"Stand\s+(\d{2})-([A-Za-z]{3})\s+(\d{2})Uhr", title)
+    title_match = re.search(r"Stand\s+(\d{2})-([A-Za-z]{3})(?:\s+(\d{2})Uhr)?", title)
     if title_match:
         month_map = {
             "Jan": 1,
@@ -3905,7 +3916,7 @@ def _load_latest_kurzuebersicht_stand() -> datetime | None:
                     created_dt.year,
                     month,
                     int(title_match.group(1)),
-                    int(title_match.group(3)),
+                    int(title_match.group(3) or 0),
                     0,
                     tzinfo=EUROPE_BERLIN,
                 )
@@ -3966,6 +3977,16 @@ def _record_mail_import_event(
 ):
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
+            if attachment_category != "unsupported":
+                cur.execute(
+                    """
+                    DELETE FROM mail_import_events
+                    WHERE mailbox_uid = %s
+                      AND attachment_name = %s
+                      AND attachment_category = 'unsupported'
+                    """,
+                    (mailbox_uid, attachment_name),
+                )
             cur.execute(
                 """
                 INSERT INTO mail_import_events (
@@ -4019,7 +4040,10 @@ def _prepare_kurzuebersicht_pdf(payload: bytes) -> dict | None:
     writer.write(buffer)
     pdf_bytes = buffer.getvalue()
     stand = metadata["stand"]
-    title = _format_kurzuebersicht_title(stand)
+    title = _format_kurzuebersicht_title(
+        stand,
+        include_time=bool(metadata.get("stand_has_time", True)),
+    )
     return {
         "category": "kurzuebersicht",
         "title": title,
@@ -5618,6 +5642,17 @@ def _latest_mail_import_events(limit: int = 20) -> list[dict]:
                 """
                 SELECT mailbox_uid, subject, attachment_name, attachment_category, skip_reason, imported_at, document_id
                 FROM mail_import_events
+                WHERE NOT (
+                    attachment_category = 'unsupported'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM mail_import_events imported
+                        WHERE imported.mailbox_uid = mail_import_events.mailbox_uid
+                          AND imported.attachment_name = mail_import_events.attachment_name
+                          AND imported.attachment_category <> 'unsupported'
+                          AND imported.document_id IS NOT NULL
+                    )
+                )
                 ORDER BY imported_at DESC
                 LIMIT %s
                 """,
