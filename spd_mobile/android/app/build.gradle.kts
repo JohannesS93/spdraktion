@@ -16,12 +16,12 @@ if (keystorePropertiesFile.exists()) {
 }
 
 android {
-    namespace = "de.spdfraktion.intern"
+    namespace = "com.spdfraktion.intern"
     compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     defaultConfig {
-        applicationId = "de.spdfraktion.intern"
+        applicationId = "com.spdfraktion.intern"
         minSdk = flutter.minSdkVersion
         targetSdk = 35
         versionCode = flutter.versionCode

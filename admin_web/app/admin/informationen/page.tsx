@@ -72,9 +72,14 @@ type FactionSpeech = {
   notes?: string[] | null;
 };
 
-type FactionSpeechesResponse = {
-  items?: FactionSpeech[];
-  speeches?: FactionSpeech[];
+type AgendaResponse = {
+  agenda_info: ParliamentInfo;
+  faction_speeches: FactionSpeech[];
+};
+
+type HomeResponse = {
+  live_info: ParliamentInfo;
+  faction_speeches: FactionSpeech[];
 };
 
 type ParliamentInfo = {
@@ -273,7 +278,7 @@ function isoDatePart(value?: string | null) {
   return value ? value.slice(0, 10) : null;
 }
 
-export default function InformationenPage() {
+export default function PlenarwochenuebersichtPage() {
   const router = useRouter();
   const [session, setSession] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
@@ -285,32 +290,12 @@ export default function InformationenPage() {
   const [selectedTop, setSelectedTop] = useState<string | null>(null);
   const [selectedSessionDate, setSelectedSessionDate] = useState<string | null>(null);
 
-  const fetchFactionSpeeches = useCallback(
-    async (token?: string | null, suffix = "") => {
-      try {
-        const speechesRes = await fetch(`${API_BASE}/me/faction-speakers${suffix}`, {
-          cache: "no-store",
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (!speechesRes.ok) {
-          setFactionSpeeches([]);
-          return;
-        }
-        const speechesData = (await speechesRes.json()) as FactionSpeechesResponse;
-        setFactionSpeeches(speechesData.speeches ?? speechesData.items ?? []);
-      } catch {
-        setFactionSpeeches([]);
-      }
-    },
-    [],
-  );
-
   const loadInfo = useCallback(async () => {
     setRefreshing(true);
     setError(null);
     try {
       const token = await auth.currentUser?.getIdToken();
-      const res = await fetch(`${API_BASE}/me/live-info`, {
+      const res = await fetch(`${API_BASE}/me/home`, {
         cache: "no-store",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
@@ -318,17 +303,18 @@ export default function InformationenPage() {
         const text = await res.text().catch(() => "");
         throw new Error(text || `HTTP ${res.status}`);
       }
-      const data = (await res.json()) as ParliamentInfo;
-      setInfo(data);
-      setAgendaInfo((previous) => previous ?? data);
-      setSelectedSessionDate((previous) => previous ?? data.current_session?.date ?? null);
-      await fetchFactionSpeeches(token);
+      const data = (await res.json()) as HomeResponse;
+      const liveInfo = data.live_info;
+      setInfo(liveInfo);
+      setAgendaInfo((previous) => previous ?? liveInfo);
+      setSelectedSessionDate((previous) => previous ?? liveInfo.current_session?.date ?? null);
+      setFactionSpeeches(data.faction_speeches ?? []);
     } catch (err) {
       setError(String(err));
     } finally {
       setRefreshing(false);
     }
-  }, [fetchFactionSpeeches]);
+  }, []);
 
   const loadAgendaForDate = useCallback(async (sessionDate?: string | null) => {
     if (!sessionDate) return;
@@ -338,7 +324,7 @@ export default function InformationenPage() {
       const token = await auth.currentUser?.getIdToken();
       const query = new URLSearchParams({ at: `${sessionDate}T12:00:00+02:00` });
       const suffix = `?${query.toString()}`;
-      const agendaRes = await fetch(`${API_BASE}/me/live-info${suffix}`, {
+      const agendaRes = await fetch(`${API_BASE}/me/agenda${suffix}`, {
         cache: "no-store",
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
@@ -346,17 +332,17 @@ export default function InformationenPage() {
         const text = await agendaRes.text().catch(() => "");
         throw new Error(text || `HTTP ${agendaRes.status}`);
       }
-      const data = (await agendaRes.json()) as ParliamentInfo;
-      setAgendaInfo(data);
+      const data = (await agendaRes.json()) as AgendaResponse;
+      setAgendaInfo(data.agenda_info);
+      setFactionSpeeches(data.faction_speeches ?? []);
       setSelectedSessionDate(sessionDate);
       setSelectedTop(null);
-      await fetchFactionSpeeches(token, suffix);
     } catch (err) {
       setError(String(err));
     } finally {
       setRefreshing(false);
     }
-  }, [fetchFactionSpeeches]);
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -402,21 +388,6 @@ export default function InformationenPage() {
     return Array.from(groups.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [info]);
 
-  const speakersByTop = useMemo(() => {
-    const grouped = new Map<string, FactionSpeech[]>();
-    factionSpeeches.forEach((speech) => {
-      const labels = [...(speech.top_labels ?? []), speech.top ?? null].flatMap((value) =>
-        normalizeTopLabels(value),
-      );
-      labels.forEach((label) => {
-        const existing = grouped.get(label) ?? [];
-        existing.push(speech);
-        grouped.set(label, existing);
-      });
-    });
-    return grouped;
-  }, [factionSpeeches]);
-
   const visibleSessionDays = useMemo(() => {
     const days = info?.session_days ?? [];
     if (!days.length) return [];
@@ -443,12 +414,12 @@ export default function InformationenPage() {
   );
 
   if (loading || !session) {
-    return <div className="p-8 text-sm text-slate-500">Lade Informationen…</div>;
+    return <div className="p-8 text-sm text-slate-500">Lade Plenarwochenübersicht…</div>;
   }
 
   return (
     <AdminShell
-      title="Informationen"
+      title="Plenarwochenübersicht"
       subtitle="Sitzungsverlauf, Rednerfolge und namentliche Abstimmungen auf einen Blick."
       session={session}
       actions={

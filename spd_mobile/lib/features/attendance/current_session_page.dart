@@ -94,10 +94,6 @@ class _CurrentSessionPageState extends State<CurrentSessionPage> {
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.meStore.isPgf) {
-      return const Scaffold(body: Center(child: Text('Kein Zugriff')));
-    }
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Aktuelle Session'),

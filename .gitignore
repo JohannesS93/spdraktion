@@ -18,6 +18,7 @@ node_modules/
 # Flutter / Dart
 .dart_tool/
 build/
+api/uploads/onboarding-preview*
 
 # Local env files
 .env

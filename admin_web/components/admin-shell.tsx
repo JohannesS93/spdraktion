@@ -56,6 +56,7 @@ type NavItem = {
 };
 
 const SHARED_ADMIN_PGF_NAV: NavItem[] = [
+  { href: "/admin/informationen", label: "Plenarwochenübersicht", icon: Info },
   { href: "/admin/planner", label: "Planer", icon: CalendarDays },
   { href: "/admin/slots", label: "Slots", icon: Pencil },
   { href: "/admin/settings", label: "Einstellungen", icon: Settings },
@@ -72,11 +73,13 @@ const SHARED_ADMIN_PGF_NAV: NavItem[] = [
 const JOHANNES_INFO_EMAIL = "johannes.schaetzl.mdb@bundestag.de";
 
 const ADMIN_ONLY_NAV: NavItem[] = [
-  { href: "/admin/users", label: "Nutzer", icon: Users },
   { href: "/admin/speech-control", label: "KÜ & Reden", icon: ClipboardList },
 ];
 
+const SPECIAL_USERS_NAV: NavItem = { href: "/admin/users", label: "Nutzer", icon: Users };
+
 const MDB_NAV: NavItem[] = [
+  { href: "/admin/informationen", label: "Plenarwochenübersicht", icon: Info },
   { href: "/admin/slots", label: "Präsenzdienste", icon: CalendarDays },
   { href: "/admin/feedback", label: "Rückmeldungen", icon: Lightbulb },
   { href: "/admin/exchanges", label: "Tausch", icon: ArrowLeftRight, disabled: true, disabledHint: "Später verfügbar" },
@@ -85,18 +88,18 @@ const MDB_NAV: NavItem[] = [
 ];
 
 function getNav(role: string): NavItem[] {
-  if (role === "admin") return [...SHARED_ADMIN_PGF_NAV, ...ADMIN_ONLY_NAV];
+  if (role === "admin") return [...SHARED_ADMIN_PGF_NAV, SPECIAL_USERS_NAV, ...ADMIN_ONLY_NAV];
   if (role === "pgf") return SHARED_ADMIN_PGF_NAV;
   return MDB_NAV;
 }
 
 function getNavForSession(session: SessionUser): NavItem[] {
-  let baseNav = getNav(session.role);
-  if (session.email?.toLowerCase() === JOHANNES_INFO_EMAIL) {
-    if (!baseNav.some((item) => item.href === "/admin/users")) {
-      baseNav = [...baseNav, ...ADMIN_ONLY_NAV];
-    }
-    return [...baseNav, { href: "/admin/informationen", label: "Informationen", icon: Info }];
+  const baseNav = getNav(session.role);
+  if (
+    session.email?.toLowerCase() === JOHANNES_INFO_EMAIL &&
+    !baseNav.some((item) => item.href === SPECIAL_USERS_NAV.href)
+  ) {
+    return [...baseNav, SPECIAL_USERS_NAV];
   }
   return baseNav;
 }

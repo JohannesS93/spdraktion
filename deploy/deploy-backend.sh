@@ -2,15 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Legacy alias: deploy-server.sh bleibt der volle Deploy.
 source "$SCRIPT_DIR/common.sh"
 
 ensure_requirements
 check_remote_ready
 sync_api
-sync_admin_web
 sync_deploy_files
-full_deploy
+backend_only_deploy
 
 echo
-echo "Voller Deploy abgeschlossen."
+echo "Backend-Only-Deploy abgeschlossen."

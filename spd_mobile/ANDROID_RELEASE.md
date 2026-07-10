@@ -2,7 +2,7 @@
 
 ## Vorbedingungen
 - Firebase-Android-Konfiguration in `spd_mobile/android/app/google-services.json`
-- Android-App in Firebase fuer Paket `de.spdfraktion.intern`
+- Android-App in Firebase fuer Paket `com.spdfraktion.intern`
 - Release-Keystore vorhanden
 - `spd_mobile/android/key.properties` lokal vorhanden
 

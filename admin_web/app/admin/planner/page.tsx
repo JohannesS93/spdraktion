@@ -160,6 +160,16 @@ type WeekPreviewResponse = {
   slots: WeekSlot[];
 };
 
+type SlotWeekSuggestion = {
+  week_start: string;
+  week_end: string;
+  source: string;
+  calendar_year: number;
+  calendar_url: string;
+  calendar_index_url: string;
+  last_existing_week_start?: string | null;
+};
+
 type PlannerRunSummary = {
   id: string;
   week_start: string;
@@ -308,6 +318,12 @@ function formatDateTimeLabel(value?: string | null) {
   }).format(parsed);
 }
 
+function parseIsoDate(value?: string | null) {
+  if (!value) return null;
+  const parsed = new Date(`${value}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function runStatusLabel(status?: string | null) {
   if (status === "applied") return "Übernommen";
   if (status === "ready") return "Vorschlag bereit";
@@ -375,7 +391,7 @@ export default function PlannerPage() {
   const [weeksLoading, setWeeksLoading] = useState(false);
   const [selectedWeekStart, setSelectedWeekStart] = useState("");
   const [weekSearch, setWeekSearch] = useState("");
-  const [weekFilter, setWeekFilter] = useState<"current" | "all" | "empty">("current");
+  const [weekFilter, setWeekFilter] = useState<"past" | "current" | "upcoming">("current");
 
   const [slotTemplates, setSlotTemplates] = useState<SlotTemplate[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
@@ -414,6 +430,8 @@ export default function PlannerPage() {
   const [weekTemplateName, setWeekTemplateName] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [creatingWeek, setCreatingWeek] = useState(false);
+  const [weekSuggestionLoading, setWeekSuggestionLoading] = useState(false);
+  const [weekSuggestion, setWeekSuggestion] = useState<SlotWeekSuggestion | null>(null);
 
   const selectedTemplate = useMemo(
     () => slotTemplates.find((template) => template.id === selectedTemplateId) ?? null,
@@ -444,25 +462,36 @@ export default function PlannerPage() {
     [slotWeeks, selectedWeekStart]
   );
 
-  const visibleSlotWeeks = useMemo(() => {
+  const categorizedSlotWeeks = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+
+    return {
+      past: slotWeeks.filter((week) => {
+        const weekEndDate = parseIsoDate(week.week_end);
+        return weekEndDate ? weekEndDate < today : false;
+      }),
+      current: slotWeeks.filter((week) => {
+        const weekStartDate = parseIsoDate(week.week_start);
+        const weekEndDate = parseIsoDate(week.week_end);
+        return weekStartDate && weekEndDate ? weekStartDate <= today && weekEndDate >= today : false;
+      }),
+      upcoming: slotWeeks.filter((week) => {
+        const weekStartDate = parseIsoDate(week.week_start);
+        return weekStartDate ? weekStartDate > today : false;
+      }),
+    };
+  }, [slotWeeks]);
+
+  const visibleSlotWeeks = useMemo(() => {
     const search = weekSearch.trim().toLowerCase();
 
     return slotWeeks.filter((week) => {
-      const weekEndDate = new Date(`${week.week_end}T00:00:00`);
-      const isCurrentOrUpcoming = Number.isNaN(weekEndDate.getTime()) ? true : weekEndDate >= today;
-      const isSelected = week.week_start === selectedWeekStart;
-      const assignmentCount =
-        (week.active_assignment_count ?? 0) + (week.ruf_assignment_count ?? 0);
-      const isEmptyWeek = assignmentCount === 0;
+      const matchesFilter = categorizedSlotWeeks[weekFilter].some(
+        (candidate) => candidate.week_start === week.week_start
+      );
 
-      const passesRange =
-        weekFilter === "empty"
-          ? isCurrentOrUpcoming && isEmptyWeek
-          : isCurrentOrUpcoming;
-
-      if (!passesRange && !isSelected) return false;
+      if (!matchesFilter) return false;
 
       if (!search) return true;
 
@@ -477,7 +506,25 @@ export default function PlannerPage() {
 
       return searchText.includes(search);
     });
-  }, [weekFilter, slotWeeks, selectedWeekStart, weekSearch]);
+  }, [categorizedSlotWeeks, slotWeeks, weekFilter, weekSearch]);
+
+  useEffect(() => {
+    if (weekFilter === "current" && categorizedSlotWeeks.current.length === 0) {
+      setWeekFilter("upcoming");
+      return;
+    }
+
+    const preferredWeeks = categorizedSlotWeeks[weekFilter];
+    if (preferredWeeks.length === 0) {
+      setSelectedWeekStart("");
+      return;
+    }
+
+    const selectedStillVisible = preferredWeeks.some((week) => week.week_start === selectedWeekStart);
+    if (!selectedStillVisible) {
+      setSelectedWeekStart(preferredWeeks[0]?.week_start ?? "");
+    }
+  }, [categorizedSlotWeeks, selectedWeekStart, weekFilter]);
 
   const assignedPeople = useMemo(
     () =>
@@ -632,10 +679,6 @@ export default function PlannerPage() {
 
       const weeks = JSON.parse(text) as SlotWeekSummary[];
       setSlotWeeks(weeks);
-      setSelectedWeekStart((current) => {
-        if (current && weeks.some((week) => week.week_start === current)) return current;
-        return weeks[0]?.week_start ?? "";
-      });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setError(`Fehler beim Laden der Sitzungswochen: ${message}`);
@@ -759,7 +802,9 @@ export default function PlannerPage() {
     await Promise.all([loadSlotWeeks(), loadSlotTemplates(), loadPlannerUsers()]);
   }
 
-  async function previewWeek() {
+  async function previewWeek(weekStartValue = weekStart, templateIdValue = selectedTemplateId || null) {
+    if (!weekStartValue) return;
+
     setPreviewLoading(true);
     setError("");
 
@@ -769,8 +814,8 @@ export default function PlannerPage() {
         method: "POST",
         headers,
         body: JSON.stringify({
-          week_start: weekStart,
-          template_id: selectedTemplateId || null,
+          week_start: weekStartValue,
+          template_id: templateIdValue,
         }),
       });
 
@@ -816,6 +861,43 @@ export default function PlannerPage() {
     ]);
   }
 
+  async function openCreateWeekDialog() {
+    setWeekDialogOpen(true);
+    setError("");
+    setWeekSlots([]);
+    setWeekTemplateName("");
+    setWeekSuggestion(null);
+
+    const templateId = selectedTemplateId || defaultTemplate?.id || slotTemplates[0]?.id || null;
+    if (templateId) {
+      setSelectedTemplateId(templateId);
+    }
+
+    setWeekSuggestionLoading(true);
+    try {
+      const headers = await getAuthHeaders();
+      const res = await fetch(`${API_BASE}/admin/slot-weeks/suggestion`, {
+        headers,
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
+
+      const suggestion = JSON.parse(text) as SlotWeekSuggestion;
+      setWeekSuggestion(suggestion);
+      setWeekStart(suggestion.week_start);
+      setWeekEnd(suggestion.week_end);
+
+      if (templateId) {
+        await previewWeek(suggestion.week_start, templateId);
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setError(`Fehler beim Laden des Wochenvorschlags: ${message}`);
+    } finally {
+      setWeekSuggestionLoading(false);
+    }
+  }
+
   async function createWeek() {
     setCreatingWeek(true);
     setError("");
@@ -841,6 +923,7 @@ export default function PlannerPage() {
       setWeekEnd("");
       setWeekSlots([]);
       setWeekTemplateName("");
+      setWeekSuggestion(null);
       await loadSlotWeeks();
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -1237,7 +1320,7 @@ export default function PlannerPage() {
                           Standardslot-Template auswählen, Vorschau prüfen und Woche speichern.
                         </div>
                       </div>
-                      <Button className="admin-btn-primary" onClick={() => setWeekDialogOpen(true)}>
+                      <Button className="admin-btn-primary" onClick={() => void openCreateWeekDialog()}>
                         <Plus className="mr-2 h-4 w-4" />
                         Sitzungswoche anlegen
                       </Button>
@@ -1322,6 +1405,18 @@ export default function PlannerPage() {
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
+                            onClick={() => setWeekFilter("past")}
+                            className={[
+                              "rounded-full border px-3 py-1 text-sm transition",
+                              weekFilter === "past"
+                                ? "border-slate-900 bg-slate-900 text-white"
+                                : "border-slate-200 bg-white text-slate-700 hover:border-slate-300",
+                            ].join(" ")}
+                          >
+                            Vergangen
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => setWeekFilter("current")}
                             className={[
                               "rounded-full border px-3 py-1 text-sm transition",
@@ -1330,31 +1425,19 @@ export default function PlannerPage() {
                                 : "border-slate-200 bg-white text-slate-700 hover:border-slate-300",
                             ].join(" ")}
                           >
-                            Aktuell & kommend
+                            Aktuell
                           </button>
                           <button
                             type="button"
-                            onClick={() => setWeekFilter("all")}
+                            onClick={() => setWeekFilter("upcoming")}
                             className={[
                               "rounded-full border px-3 py-1 text-sm transition",
-                              weekFilter === "all"
+                              weekFilter === "upcoming"
                                 ? "border-slate-900 bg-slate-900 text-white"
                                 : "border-slate-200 bg-white text-slate-700 hover:border-slate-300",
                             ].join(" ")}
                           >
-                            Alle kommenden Wochen
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setWeekFilter("empty")}
-                            className={[
-                              "rounded-full border px-3 py-1 text-sm transition",
-                              weekFilter === "empty"
-                                ? "border-slate-900 bg-slate-900 text-white"
-                                : "border-slate-200 bg-white text-slate-700 hover:border-slate-300",
-                            ].join(" ")}
-                          >
-                            Leere Sitzungswochen
+                            Kommend
                           </button>
                         </div>
                       </div>
@@ -1925,7 +2008,7 @@ export default function PlannerPage() {
                   className="admin-btn"
                   variant="outline"
                   onClick={() => void previewWeek()}
-                  disabled={previewLoading || !weekStart}
+                  disabled={previewLoading || weekSuggestionLoading || !weekStart}
                 >
                   {previewLoading ? "Lädt…" : "Vorschau laden"}
                 </Button>
@@ -1940,6 +2023,25 @@ export default function PlannerPage() {
             </div>
 
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-700">
+              {weekSuggestion ? (
+                <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-3 text-emerald-900">
+                  <div className="font-medium">Automatischer Vorschlag aus dem offiziellen Bundestag-Sitzungskalender</div>
+                  <div className="mt-1 text-sm">
+                    Vorgeschlagen wurde die Woche <span className="font-medium">{formatDateLabel(weekSuggestion.week_start)}</span>
+                    {" "}bis{" "}
+                    <span className="font-medium">{formatDateLabel(weekSuggestion.week_end)}</span>.
+                    {weekSuggestion.last_existing_week_start ? (
+                      <>
+                        {" "}Letzte bereits angelegte Woche:{" "}
+                        <span className="font-medium">{formatDateLabel(weekSuggestion.last_existing_week_start)}</span>.
+                      </>
+                    ) : (
+                      " Es war noch keine Sitzungswoche angelegt."
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
               {weekTemplateName ? (
                 <>
                   Vorschau aus Template <span className="font-medium">{weekTemplateName}</span> für{" "}
@@ -1947,7 +2049,9 @@ export default function PlannerPage() {
                   {weekEnd ? <> bis <span className="font-medium">{formatDateLabel(weekEnd)}</span></> : null}
                 </>
               ) : (
-                "Bitte zuerst eine Sitzungswoche laden oder Slots manuell ergänzen."
+                weekSuggestionLoading
+                  ? "Automatischer Vorschlag wird geladen."
+                  : "Bitte zuerst eine Sitzungswoche laden oder Slots manuell ergänzen."
               )}
             </div>
 
@@ -2023,7 +2127,14 @@ export default function PlannerPage() {
           </div>
 
           <DialogFooter className="border-t border-slate-200 px-6 py-4">
-            <Button variant="outline" className="admin-btn" onClick={() => setWeekDialogOpen(false)}>
+            <Button
+              variant="outline"
+              className="admin-btn"
+              onClick={() => {
+                setWeekDialogOpen(false);
+                setWeekSuggestion(null);
+              }}
+            >
               Abbrechen
             </Button>
 

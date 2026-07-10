@@ -10,12 +10,19 @@ ON CONFLICT DO NOTHING;
 INSERT INTO users (id, email, first_name, last_name, group_id, role)
 VALUESpython3 - << 'EOF'
 import csv
-import uui
+import uuid
 group_map = {
     "A": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
     "B": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
     "C": "cccccccc-cccc-cccc-cccc-cccccccccccc",
 }
+
+def bundestag_email(vor, nach):
+    local = f"{vor.lower()}.{nach.lower()}"
+    for token in ("prof.", "dr.", "jur.", "(med)"):
+        local = local.replace(token, "")
+    local = local.replace("..", ".").replace(" ", "")
+    return f"{local}@bundestag.de"
 
 rows = []
 with open("/mnt/data/Personen-Gruppen_neu3.csv", encoding="latin1") as f:
@@ -23,7 +30,7 @@ with open("/mnt/data/Personen-Gruppen_neu3.csv", encoding="latin1") as f:
     next(reader)
     for r in reader:
         vor, nach, grp, role = r
-        email = f"{vor.lower()}.{nach.lower()}@bundestag.de".replace(" ", "")
+        email = bundestag_email(vor, nach)
         rows.append(
             f"('{uuid.uuid4()}', '{email}', '{vor}', '{nach}', '{group_map.get(grp)}', '{role}')"
         )
@@ -45,7 +52,7 @@ with open("/mnt/data/Personen-Gruppen_neu3.csv", encoding="latin1") as f:
     next(reader)
     for r in reader:
         vor, nach, grp, role = r
-        email = f"{vor.lower()}.{nach.lower()}@bundestag.de".replace(" ", "")
+        email = bundestag_email(vor, nach)
         rows.append(
             f"('{uuid.uuid4()}', '{email}', '{vor}', '{nach}', '{group_map.get(grp)}', '{role}')"
         )

@@ -49,6 +49,7 @@ type Slot = {
   open_end: boolean;
   active_count?: number;
   ruf_count?: number;
+  pgf_duty?: string | null;
 };
 
 type SlotWeekSummary = {
@@ -212,6 +213,7 @@ export default function SlotsPage() {
   const [participantSearch, setParticipantSearch] = useState("");
   const [attendanceGrants, setAttendanceGrants] = useState<AttendanceGrant[]>([]);
   const [attendanceGrantUserId, setAttendanceGrantUserId] = useState("");
+  const [attendanceGrantUserSearch, setAttendanceGrantUserSearch] = useState("");
   const [attendanceGrantValidFrom, setAttendanceGrantValidFrom] = useState("");
   const [attendanceGrantValidUntil, setAttendanceGrantValidUntil] = useState("");
   const [attendanceGrantSaving, setAttendanceGrantSaving] = useState(false);
@@ -241,6 +243,29 @@ export default function SlotsPage() {
     if (canManage) return filteredParticipants;
     return filteredParticipants.filter((participant) => participant.is_effectively_assigned);
   }, [canManage, filteredParticipants]);
+
+  const filteredGrantUsers = useMemo(() => {
+    const q = attendanceGrantUserSearch.trim().toLowerCase();
+    const sorted = [...mdbUsers].sort((left, right) => {
+      const leftRank = left.role === "pgf" ? 0 : 1;
+      const rightRank = right.role === "pgf" ? 0 : 1;
+      if (leftRank !== rightRank) return leftRank - rightRank;
+
+      const leftLabel =
+        `${left.last_name ?? ""} ${left.first_name ?? ""} ${left.email}`.toLowerCase();
+      const rightLabel =
+        `${right.last_name ?? ""} ${right.first_name ?? ""} ${right.email}`.toLowerCase();
+      return leftLabel.localeCompare(rightLabel, "de");
+    });
+
+    if (!q) return sorted;
+
+    return sorted.filter((user) => {
+      const haystack =
+        `${user.first_name ?? ""} ${user.last_name ?? ""} ${user.email} ${user.role ?? ""}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [attendanceGrantUserSearch, mdbUsers]);
 
   const totalAssignments =
     (selectedWeek?.active_assignment_count ?? 0) + (selectedWeek?.ruf_assignment_count ?? 0);
@@ -387,10 +412,25 @@ export default function SlotsPage() {
 
   async function loadMdbUsers() {
     const headers = await getAuthHeaders();
-    const res = await fetch(`${API_BASE}/admin/users?role=mdb`, { headers });
-    const text = await res.text();
-    if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
-    setMdbUsers(JSON.parse(text) as MdbUser[]);
+    const [mdbRes, pgfRes] = await Promise.all([
+      fetch(`${API_BASE}/admin/users?role=mdb`, { headers }),
+      fetch(`${API_BASE}/admin/users?role=pgf`, { headers }),
+    ]);
+
+    const [mdbText, pgfText] = await Promise.all([mdbRes.text(), pgfRes.text()]);
+    if (!mdbRes.ok) throw new Error(mdbText || `HTTP ${mdbRes.status}`);
+    if (!pgfRes.ok) throw new Error(pgfText || `HTTP ${pgfRes.status}`);
+
+    const combined = [
+      ...(JSON.parse(mdbText) as MdbUser[]),
+      ...(JSON.parse(pgfText) as MdbUser[]),
+    ];
+
+    const uniqueUsers = Array.from(
+      new Map(combined.map((user) => [user.id, user])).values(),
+    );
+
+    setMdbUsers(uniqueUsers);
   }
 
   async function loadAttendanceGrants(slotId: string) {
@@ -532,6 +572,7 @@ export default function SlotsPage() {
     setError("");
     setParticipantSearch("");
     setAttendanceGrantUserId("");
+    setAttendanceGrantUserSearch("");
     const defaultFrom = toLocalDateTimeInputValue(slot.slot_date, slot.start_time);
     setAttendanceGrantValidFrom(defaultFrom);
     setAttendanceGrantValidUntil(
@@ -908,8 +949,8 @@ export default function SlotsPage() {
                   className={[
                     "admin-table-header grid",
                     canManage
-                      ? "grid-cols-[140px_110px_140px_90px_90px_110px_220px]"
-                      : "grid-cols-[140px_110px_140px_90px_90px_110px_120px]",
+                      ? "grid-cols-[140px_110px_140px_90px_90px_110px_220px_220px]"
+                      : "grid-cols-[140px_110px_140px_90px_90px_110px_220px_120px]",
                   ].join(" ")}
                 >
                   <div>Datum</div>
@@ -918,6 +959,7 @@ export default function SlotsPage() {
                   <div>Aktiv</div>
                   <div>Ruf</div>
                   <div>Status</div>
+                  <div>PGF-Dienst</div>
                   <div>Aktion</div>
                 </div>
 
@@ -927,8 +969,8 @@ export default function SlotsPage() {
                     className={[
                       "admin-table-row grid",
                       canManage
-                        ? "grid-cols-[140px_110px_140px_90px_90px_110px_220px]"
-                        : "grid-cols-[140px_110px_140px_90px_90px_110px_120px]",
+                        ? "grid-cols-[140px_110px_140px_90px_90px_110px_220px_220px]"
+                        : "grid-cols-[140px_110px_140px_90px_90px_110px_220px_120px]",
                     ].join(" ")}
                   >
                     <div>{slot.slot_date}</div>
@@ -941,6 +983,7 @@ export default function SlotsPage() {
                         {slot.open_end ? "offen" : "normal"}
                       </Badge>
                     </div>
+                    <div>{slot.pgf_duty || "—"}</div>
                     <div className="flex gap-2">
                       <Button
                         size="sm"
@@ -1141,13 +1184,18 @@ export default function SlotsPage() {
               <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
                 <div className="text-sm font-semibold text-slate-900">Temporäre PGF-Rechte</div>
                 <div className="mt-1 text-sm text-slate-600">
-                  Hier kann ein einzelner MdB für ein begrenztes Zeitfenster die Sitzungsleitung
+                  Hier kann ein einzelner MdB oder PGF für ein begrenztes Zeitfenster die Sitzungsleitung
                   übernehmen und den Dienst abhaken, ohne weitere PGF-Rechte zu erhalten.
                 </div>
 
                 <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_180px_auto] lg:items-end">
                   <div className="space-y-2">
-                    <Label>MdB auswählen</Label>
+                    <Label>MdB / PGF auswählen</Label>
+                    <Input
+                      value={attendanceGrantUserSearch}
+                      onChange={(event) => setAttendanceGrantUserSearch(event.target.value)}
+                      placeholder="Namen eingeben und direkt filtern"
+                    />
                     <Select
                       value={attendanceGrantUserId || "none"}
                       onValueChange={(value) =>
@@ -1155,16 +1203,16 @@ export default function SlotsPage() {
                       }
                     >
                       <SelectTrigger className="admin-select-trigger">
-                        <SelectValue placeholder="MdB auswählen" />
+                        <SelectValue placeholder="MdB / PGF auswählen" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="none">MdB auswählen</SelectItem>
-                        {mdbUsers.map((user) => {
+                        <SelectItem value="none">MdB / PGF auswählen</SelectItem>
+                        {filteredGrantUsers.map((user) => {
                           const label =
                             `${user.first_name ?? ""} ${user.last_name ?? ""}`.trim() || user.email;
                           return (
                             <SelectItem key={user.id} value={user.id}>
-                              {label}
+                              {label} {user.role === "pgf" ? "(PGF)" : "(MdB)"}
                             </SelectItem>
                           );
                         })}

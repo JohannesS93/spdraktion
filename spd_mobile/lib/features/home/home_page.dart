@@ -7,10 +7,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../core/api_client.dart';
 import '../../core/config.dart';
 import '../../core/feature_flags.dart';
-import '../attendance/attendance_stats_page.dart';
-import '../attendance/current_session_page.dart';
 import '../feedback/feedback_page.dart';
-import '../messages/message_compose_page.dart';
 import '../profile/me_store.dart';
 
 class HomePage extends StatefulWidget {
@@ -19,11 +16,13 @@ class HomePage extends StatefulWidget {
     required this.onNavigateToTab,
     required this.meStore,
     required this.liveUnreadCount,
+    required this.onResetDeviceActivation,
   });
 
   final void Function(int index) onNavigateToTab;
   final MeStore meStore;
   final int liveUnreadCount;
+  final Future<void> Function() onResetDeviceActivation;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -162,6 +161,18 @@ class _HomePageState extends State<HomePage> {
                   label: const Text('Abmelden'),
                 ),
               ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    Navigator.of(context).pop();
+                    await _confirmDeviceReset();
+                  },
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('Gerät neu koppeln'),
+                ),
+              ),
             ],
           ),
         ),
@@ -191,6 +202,31 @@ class _HomePageState extends State<HomePage> {
     if (shouldLogout != true) return;
 
     await FirebaseAuth.instance.signOut();
+  }
+
+  Future<void> _confirmDeviceReset() async {
+    final shouldReset = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Gerät neu koppeln'),
+        content: const Text(
+          'Die lokale Gerätekopplung wird entfernt und du landest wieder beim QR-Scanner. Für die erneute Kopplung brauchst du anschließend einen gültigen persönlichen QR-Code.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Abbrechen'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Neu koppeln'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldReset != true) return;
+    await widget.onResetDeviceActivation();
   }
 
   String get currentUserId {
@@ -238,6 +274,38 @@ class _HomePageState extends State<HomePage> {
       );
     }
 
+    try {
+      final homeRaw = await api.getJson('/me/home') as Map<String, dynamic>?;
+      final nextSlot = homeRaw?['next_slot'] as Map<String, dynamic>?;
+      final pendingCount = (homeRaw?['pending_count'] ?? 0) as int;
+      final unreadCount = (homeRaw?['unread_count'] ?? 0) as int;
+      final latestDocument =
+          homeRaw?['latest_document'] as Map<String, dynamic>?;
+      final latestSummaryDocument =
+          homeRaw?['latest_summary_document'] as Map<String, dynamic>?;
+      final liveInfo = homeRaw?['live_info'] as Map<String, dynamic>?;
+      final factionSpeeches =
+          ((homeRaw?['faction_speeches'] ?? const <dynamic>[]) as List<dynamic>)
+              .map((item) => item as Map<String, dynamic>)
+              .toList();
+
+      return _HomeData(
+        nextSlot: nextSlot,
+        pendingCount: pendingCount,
+        unreadCount: unreadCount,
+        latestDocument: latestDocument,
+        latestSummaryDocument: latestSummaryDocument,
+        liveInfo: liveInfo,
+        factionSpeeches: factionSpeeches,
+      );
+    } catch (error) {
+      final rawError = error.toString();
+      if (!rawError.contains('HTTP 404')) rethrow;
+      return _loadHomeLegacy();
+    }
+  }
+
+  Future<_HomeData> _loadHomeLegacy() async {
     final upcomingRaw =
         await api.getJson(
               '/me/upcoming-slots',
@@ -409,7 +477,6 @@ class _HomePageState extends State<HomePage> {
           child: AnimatedBuilder(
             animation: widget.meStore,
             builder: (context, _) {
-              final isPgf = widget.meStore.isPgf;
               final liveUnreadCount = widget.liveUnreadCount;
 
               return FutureBuilder<_HomeData>(
@@ -452,8 +519,6 @@ class _HomePageState extends State<HomePage> {
                       liveInfo?['next_roll_call'] as Map<String, dynamic>?;
                   final nextSpeech =
                       liveInfo?['next_speech'] as Map<String, dynamic>?;
-                  final nextPgfDuty =
-                      liveInfo?['next_pgf_duty'] as Map<String, dynamic>?;
                   final viewer = liveInfo?['viewer'] as Map<String, dynamic>?;
                   final principalName = (viewer?['principal_name'] ?? '')
                       .toString()
@@ -605,7 +670,7 @@ class _HomePageState extends State<HomePage> {
                                     : 'neue Mitteilungen',
                                 icon: Icons.notifications_active_outlined,
                                 color: const Color(0xFF39424E),
-                                onTap: () => widget.onNavigateToTab(3),
+                                onTap: () => widget.onNavigateToTab(4),
                                 accent: liveUnreadCount > 0,
                               ),
                             ),
@@ -640,16 +705,6 @@ class _HomePageState extends State<HomePage> {
                           color: const Color(0xFF6F4D57),
                           icon: Icons.record_voice_over_outlined,
                         ),
-                        if (isPgf) ...[
-                          const SizedBox(height: 12),
-                          _InfoPanelCard(
-                            title: 'Nächster PGF-Dienst',
-                            headline: _formatPgfDutyHeadline(nextPgfDuty),
-                            detail: _formatPgfDutyDetail(nextPgfDuty),
-                            color: const Color(0xFF39424E),
-                            icon: Icons.badge_outlined,
-                          ),
-                        ],
                         const SizedBox(height: 18),
                         _SectionTitle(title: 'Sitzungsagenda', subtitle: ''),
                         const SizedBox(height: 10),
@@ -835,7 +890,7 @@ class _HomePageState extends State<HomePage> {
                                   : '${data.latestSummaryDocument!['filename'] ?? ''}',
                               icon: Icons.article_outlined,
                               color: const Color(0xFF8E6B3A),
-                              onTap: () => widget.onNavigateToTab(4),
+                              onTap: () => widget.onNavigateToTab(5),
                             ),
                             _QuickActionCard(
                               title: 'Dateien',
@@ -844,7 +899,7 @@ class _HomePageState extends State<HomePage> {
                                   : 'Neueste: ${data.latestDocument!['filename'] ?? ''}',
                               icon: Icons.folder_outlined,
                               color: const Color(0xFFB36A5E),
-                              onTap: () => widget.onNavigateToTab(4),
+                              onTap: () => widget.onNavigateToTab(5),
                             ),
                           ],
                         ),
@@ -862,63 +917,6 @@ class _HomePageState extends State<HomePage> {
                             );
                           },
                         ),
-                        if (isPgf) ...[
-                          const SizedBox(height: 20),
-                          _SectionTitle(
-                            title: 'PGF Bereich',
-                            subtitle: 'Sitzung, Mitteilung und Auswertung',
-                          ),
-                          const SizedBox(height: 10),
-                          _ActionListCard(
-                            title: 'Aktuelle Session',
-                            subtitle: 'Teilnehmer abhaken',
-                            icon: Icons.play_circle_outline,
-                            onTap: () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => CurrentSessionPage(
-                                    meStore: widget.meStore,
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                          const SizedBox(height: 12),
-                          _ActionListCard(
-                            title: 'Mitteilung schreiben',
-                            subtitle: 'Neue Mitteilung an alle versenden',
-                            icon: Icons.edit_note,
-                            onTap: () async {
-                              await Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => MessageComposePage(
-                                    meStore: widget.meStore,
-                                  ),
-                                ),
-                              );
-
-                              if (!mounted) return;
-                              setState(() {
-                                future = loadHome();
-                              });
-                            },
-                          ),
-                          const SizedBox(height: 12),
-                          _ActionListCard(
-                            title: 'Statistik',
-                            subtitle: 'Sitzungsdienst-Auswertung',
-                            icon: Icons.bar_chart,
-                            onTap: () {
-                              Navigator.of(context).push(
-                                MaterialPageRoute(
-                                  builder: (_) => AttendanceStatsPage(
-                                    meStore: widget.meStore,
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ],
                       ],
                     ),
                   );
@@ -982,33 +980,6 @@ class _HomePageState extends State<HomePage> {
       (point['end_at'] ?? point['start_at'])?.toString(),
     );
     return 'Start: $start\nVoraussichtliches Ende: $end';
-  }
-
-  String _formatPgfDutyHeadline(Map<String, dynamic>? duty) {
-    if (duty == null) return 'Kein kommender PGF-Dienst';
-    final slotCode = (duty['slot_code'] ?? '').toString();
-    final weekday = (duty['weekday'] ?? '').toString();
-    final date = (duty['date'] ?? '').toString();
-    return [
-      slotCode,
-      weekday,
-      date,
-    ].where((part) => part.isNotEmpty).join(' • ');
-  }
-
-  String _formatPgfDutyDetail(Map<String, dynamic>? duty) {
-    if (duty == null) {
-      return 'Sobald ein Dienst geplant ist, erscheint er hier.';
-    }
-    final start = _hhmm(duty['start_time']);
-    final end = _hhmmNullable(duty['end_time']);
-    final assignmentType = (duty['assignment_type'] ?? '').toString();
-    final time = (end == null || end.isEmpty)
-        ? '$start Uhr'
-        : '$start–$end Uhr';
-    if (assignmentType == 'ruf') return '$time · Ruf';
-    if (assignmentType == 'active') return '$time · Aktiv';
-    return time;
   }
 
   List<Map<String, dynamic>> _visibleSessionDays(

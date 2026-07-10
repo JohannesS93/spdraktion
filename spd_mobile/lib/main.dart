@@ -24,6 +24,7 @@ import 'features/auth/login_page.dart';
 import 'features/home/home_page.dart';
 import 'features/messages/message_store.dart';
 import 'features/messages/messages_page.dart';
+import 'features/pgf/pgf_hub_page.dart';
 import 'features/profile/me_store.dart';
 import 'features/slots/slots_page.dart';
 import 'features/documents/document_page.dart';
@@ -90,6 +91,12 @@ class PraesenzdienstApp extends StatefulWidget {
 class _PraesenzdienstAppState extends State<PraesenzdienstApp> {
   int activationReloadKey = 0;
 
+  void _reloadActivationFlow() {
+    setState(() {
+      activationReloadKey += 1;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -110,13 +117,7 @@ class _PraesenzdienstAppState extends State<PraesenzdienstApp> {
           }
 
           if (activationSnap.data != true) {
-            return DeviceActivationPage(
-              onActivated: () {
-                setState(() {
-                  activationReloadKey += 1;
-                });
-              },
-            );
+            return DeviceActivationPage(onActivated: _reloadActivationFlow);
           }
 
           return StreamBuilder<User?>(
@@ -129,10 +130,10 @@ class _PraesenzdienstAppState extends State<PraesenzdienstApp> {
               }
 
               if (snap.data == null) {
-                return const LoginPage();
+                return LoginPage(onRestartOnboarding: _reloadActivationFlow);
               }
 
-              return const AppShell();
+              return AppShell(onActivationReset: _reloadActivationFlow);
             },
           );
         },
@@ -142,7 +143,9 @@ class _PraesenzdienstAppState extends State<PraesenzdienstApp> {
 }
 
 class AppShell extends StatefulWidget {
-  const AppShell({super.key});
+  const AppShell({super.key, required this.onActivationReset});
+
+  final VoidCallback onActivationReset;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -190,9 +193,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   StreamSubscription<RemoteMessage>? _onMessageSub;
   StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
   StreamSubscription<String>? _onTokenRefreshSub;
+  Timer? _pgfAccessPollTimer;
   DateTime? _lastResumeRefreshAt;
   _AppVersionPolicy? _appVersionPolicy;
   bool _showSoftUpdateNotice = false;
+  bool hasPgfAreaAccess = false;
 
   late Future<void> meFuture;
 
@@ -214,6 +219,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _pgfAccessPollTimer?.cancel();
     _onMessageSub?.cancel();
     _onMessageOpenedSub?.cancel();
     _onTokenRefreshSub?.cancel();
@@ -224,6 +230,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshMessagesOnResume();
+      _startPgfAccessPolling();
+    } else if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _stopPgfAccessPolling();
     }
   }
 
@@ -240,6 +251,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     // Lightweight refresh so new Mitteilungen show up even if push is delayed/missed.
     unawaited(messageStore.loadFromApi(api, userId: meStore.userIdOrThrow));
     unawaited(_loadUnreadCount());
+    unawaited(_loadPgfAreaAccess());
   }
 
   Future<void> _initApp() async {
@@ -255,11 +267,32 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     }
     await _loadUnreadCount();
     await _loadAppVersionPolicy();
+    await _loadPgfAreaAccess();
 
     _initPush();
     messageStore.loadFromApi(api, userId: meStore.userIdOrThrow);
+    _startPgfAccessPolling();
 
     AppLogger.i('Initialisierung abgeschlossen', tag: 'AppShell');
+  }
+
+  void _startPgfAccessPolling() {
+    _pgfAccessPollTimer?.cancel();
+    if (meStore.id == null || meStore.id!.isEmpty) return;
+    _pgfAccessPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_loadPgfAreaAccess());
+    });
+  }
+
+  void _stopPgfAccessPolling() {
+    _pgfAccessPollTimer?.cancel();
+    _pgfAccessPollTimer = null;
+  }
+
+  Future<void> _resetDeviceActivation() async {
+    await DeviceActivationStore.clearActivation();
+    widget.onActivationReset();
+    await FirebaseAuth.instance.signOut();
   }
 
   Future<void> _loadUnreadCount() async {
@@ -294,6 +327,27 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         error: e,
         stackTrace: st,
       );
+    }
+  }
+
+  Future<void> _loadPgfAreaAccess() async {
+    try {
+      final data = await api.getJson('/pgf/access') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        hasPgfAreaAccess = data['can_access_pgf_area'] == true;
+      });
+    } catch (e, st) {
+      AppLogger.e(
+        'load pgf access failed',
+        tag: 'PGF',
+        error: e,
+        stackTrace: st,
+      );
+      if (!mounted) return;
+      setState(() {
+        hasPgfAreaAccess = meStore.isPgf;
+      });
     }
   }
 
@@ -501,11 +555,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 ? 'Es gibt eine neue dringende Mitteilung.'
                 : 'Es gibt eine neue Mitteilung.'),
         color: color,
-        targetTab: 3,
+        targetTab: 4,
       );
 
       if (openedByTap && mounted) {
-        setState(() => index = 3);
+        setState(() => index = 4);
       }
 
       return;
@@ -519,11 +573,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         title: 'Mitteilung entfernt',
         body: 'Eine Mitteilung wurde entfernt.',
         color: const Color(0xFF39424E),
-        targetTab: 3,
+        targetTab: 4,
       );
 
       if (openedByTap && mounted) {
-        setState(() => index = 3);
+        setState(() => index = 4);
       }
 
       return;
@@ -537,11 +591,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         title: 'Mitteilungen aktualisiert',
         body: 'Mitteilungen wurden entfernt. Die Liste wurde aktualisiert.',
         color: const Color(0xFF39424E),
-        targetTab: 3,
+        targetTab: 4,
       );
 
       if (openedByTap && mounted) {
-        setState(() => index = 3);
+        setState(() => index = 4);
       }
 
       return;
@@ -645,6 +699,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 16),
+                    if (meStore.requiresDeviceActivation) ...[
+                      FilledButton.icon(
+                        onPressed: _resetDeviceActivation,
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text('Gerät neu koppeln'),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
                     FilledButton(
                       onPressed: () {
                         setState(() {
@@ -672,6 +734,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             onNavigateToTab: (i) => setState(() => index = i),
             meStore: meStore,
             liveUnreadCount: unreadCount,
+            onResetDeviceActivation: _resetDeviceActivation,
           ),
           SlotsPage(key: ValueKey(slotsReloadKey), meStore: meStore),
           const _DisabledFeaturePage(
@@ -679,6 +742,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             message:
                 'Das Tauschtool bleibt vorerst deaktiviert und wird später freigeschaltet.',
           ),
+          PgfHubPage(meStore: meStore),
           MessagesPage(
             store: messageStore,
             api: api,
@@ -809,14 +873,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
 
                                 if (target != null && mounted) {
                                   setState(() => index = target);
-                                  if (target == 3) {
+                                  if (target == 4) {
                                     await _markAllMessagesAsRead();
                                   }
                                 }
                                 return;
                               }
 
-                              setState(() => index = 3);
+                              setState(() => index = 4);
                               messageStore.clearUrgentBanner();
                               await _markAllMessagesAsRead();
                             },
@@ -901,6 +965,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 return;
               }
 
+              if (i == 3) {
+                await _loadPgfAreaAccess();
+                if (!hasPgfAreaAccess) {
+                  return;
+                }
+              }
+
               if (i == 1) {
                 setState(() {
                   index = i;
@@ -910,7 +981,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                 setState(() => index = i);
               }
 
-              if (i == 3) {
+              if (i == 4) {
                 // Refresh messages when user opens the tab (tab stays alive, so initState won't re-run).
                 await messageStore.loadFromApi(
                   api,
@@ -936,6 +1007,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                   color: exchangesEnabled ? null : Colors.grey,
                 ),
                 label: 'Tausch',
+              ),
+              NavigationDestination(
+                icon: Icon(
+                  Icons.badge_outlined,
+                  color: hasPgfAreaAccess ? null : Colors.grey,
+                ),
+                label: 'PGF',
               ),
               NavigationDestination(
                 icon: Stack(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 from email import message_from_bytes
 from email.header import decode_header
 import html
@@ -29,13 +30,20 @@ from datetime import datetime, timezone
 from datetime import date, timedelta
 from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi import UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 import certifi
 from pypdf import PdfReader
 from pypdf import PdfWriter
+import qrcode
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfgen import canvas
 import uuid
 from planner_engine import (
     ExistingAssignment as PlannerExistingAssignment,
@@ -52,13 +60,16 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "spd-fraktion-intern")
 EUROPE_BERLIN = ZoneInfo("Europe/Berlin")
 BUNDESTAG_CONFERENCES_URL = "https://www.bundestag.de/static/appdata/plenum/v2/conferences.xml"
+BUNDESTAG_SESSION_CALENDAR_URL = "https://www.bundestag.de/parlament/plenum/sitzungskalender"
 BUNDESTAG_SPEAKER_URL = "https://www.bundestag.de/static/appdata/plenum/v2/speaker.xml"
 BUNDESTAG_ARTICLE_XML_URL = "https://www.bundestag.de/blueprint/servlet/content/{article_id}/asAppV2NewsarticleXml"
 BUNDESTAG_TAGESORDNUNGEN_URL = "https://www.bundestag.de/parlament/plenum/tagesordnungen"
-BUNDESTAG_LIVE_CACHE_SECONDS = 60
+BUNDESTAG_LIVE_CACHE_SECONDS = 300
 _bundestag_live_cache_lock = threading.Lock()
 _bundestag_live_cache: dict[str, tuple[datetime, str]] = {}
 _bundestag_live_bytes_cache: dict[str, tuple[datetime, bytes]] = {}
+_parliament_payload_cache: dict[str, tuple[datetime, dict]] = {}
+_faction_speeches_cache: dict[str, tuple[datetime, list[dict]]] = {}
 MAIL_IMPORT_IMAP_HOST = os.environ.get("MAIL_IMPORT_IMAP_HOST", "imap.strato.de")
 MAIL_IMPORT_IMAP_PORT = int(os.environ.get("MAIL_IMPORT_IMAP_PORT", "993"))
 MAIL_IMPORT_USERNAME = os.environ.get("MAIL_IMPORT_USERNAME", "").strip()
@@ -1124,6 +1135,7 @@ def _slot_row_to_dict(r):
         "open_end": bool(r[5]),
         "active_count": active_count,
         "ruf_count": ruf_count,
+        "pgf_duty": r[8] if len(r) > 8 and r[8] else None,
     }
 
 
@@ -1872,6 +1884,142 @@ def _new_activation_code() -> str:
     return secrets.token_urlsafe(24)
 
 
+def _build_invitation_payload(invitation_id: UUID, user_row, code: str | None, expires_at: datetime, created_at: datetime | None):
+    qr_payload = f"spdfraktion://activate?code={code}" if code else None
+    return {
+        "id": str(invitation_id),
+        "user_id": str(user_row[0]),
+        "email": user_row[1],
+        "name": _format_person_name(user_row[2], user_row[3]) or "",
+        "code": code,
+        "qr_payload": qr_payload,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "created_at": created_at.isoformat() if created_at else None,
+        "has_code": bool(code),
+    }
+
+
+def _create_onboarding_invitation(cur, *, user_row, actor_user_id: UUID | None, expires_at: datetime, replace_open: bool):
+    code = _new_activation_code()
+    token_hash = _hash_activation_code(code)
+    if replace_open:
+        cur.execute(
+            """
+            UPDATE activation_invitations
+            SET status = 'revoked'
+            WHERE user_id = %s
+              AND status = 'open'
+            """,
+            (user_row[0],),
+        )
+    cur.execute(
+        """
+        INSERT INTO activation_invitations (
+            user_id,
+            token_hash,
+            activation_code,
+            expires_at,
+            created_by_user_id
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING id, created_at
+        """,
+        (user_row[0], token_hash, code, expires_at, actor_user_id),
+    )
+    invitation_row = cur.fetchone()
+    return _build_invitation_payload(invitation_row[0], user_row, code, expires_at, invitation_row[1])
+
+
+def _draw_onboarding_handout(pdf: canvas.Canvas, *, name: str, email: str, code: str, expires_at: datetime | None):
+    page_width, page_height = A4
+    template_path = os.path.join(BASE_DIR, "assets", "onboarding-template-v1.png")
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"Onboarding template not found: {template_path}")
+
+    pdf.setTitle(f"Onboarding {name or email}")
+    pdf.setAuthor("SPD Fraktion Intern")
+    pdf.drawImage(ImageReader(template_path), 0, 0, width=page_width, height=page_height, preserveAspectRatio=False)
+
+    def px_x(value: float) -> float:
+        return (value / 1055.0) * page_width
+
+    def px_y_from_top(value: float) -> float:
+        return page_height - ((value / 1491.0) * page_height)
+
+    def fit_font_size(text: str, font_name: str, max_font_size: float, max_width: float, min_font_size: float = 8.0) -> float:
+        font_size = max_font_size
+        while font_size > min_font_size and stringWidth(text, font_name, font_size) > max_width:
+            font_size -= 0.5
+        return font_size
+
+    qr_frame_x = px_x(548)
+    qr_frame_top = 593
+    qr_frame_bottom = 968
+    qr_frame_y = px_y_from_top(qr_frame_bottom)
+    qr_frame_width = px_x(957) - px_x(548)
+    qr_frame_height = px_y_from_top(qr_frame_top) - px_y_from_top(qr_frame_bottom)
+    qr_margin = 18
+    qr_box_size = min(qr_frame_width, qr_frame_height) - (2 * qr_margin)
+    qr_box_x = qr_frame_x + ((qr_frame_width - qr_box_size) / 2)
+    qr_box_y = qr_frame_y + ((qr_frame_height - qr_box_size) / 2)
+
+    pdf.setFillColor(colors.white)
+    pdf.rect(qr_box_x, qr_box_y, qr_box_size, qr_box_size, stroke=0, fill=1)
+
+    qr_value = f"spdfraktion://activate?code={code}"
+    qr_image = qrcode.make(qr_value)
+    qr_buffer = BytesIO()
+    qr_image.save(qr_buffer, format="PNG")
+    qr_buffer.seek(0)
+    qr_inner_padding = 8
+    qr_draw_size = qr_box_size - (2 * qr_inner_padding)
+    pdf.drawImage(
+        ImageReader(qr_buffer),
+        qr_box_x + qr_inner_padding,
+        qr_box_y + qr_inner_padding,
+        width=qr_draw_size,
+        height=qr_draw_size,
+        preserveAspectRatio=True,
+        mask="auto",
+    )
+
+    code_box_x = px_x(541)
+    code_box_y = px_y_from_top(1140)
+    code_box_width = px_x(945) - px_x(541)
+    code_box_height = px_y_from_top(1072) - px_y_from_top(1140)
+    pdf.setFillColor(colors.white)
+    pdf.roundRect(code_box_x, code_box_y, code_box_width, code_box_height, 5, stroke=0, fill=1)
+    code_font_size = fit_font_size(code, "Helvetica-Bold", 24, code_box_width - 18)
+    pdf.setFillColor(colors.HexColor("#10213D"))
+    pdf.setFont("Helvetica-Bold", code_font_size)
+    code_width = stringWidth(code, "Helvetica-Bold", code_font_size)
+    pdf.drawString(code_box_x + ((code_box_width - code_width) / 2), code_box_y + (code_box_height / 2) - (code_font_size * 0.28), code)
+
+    text_cover_x = px_x(606)
+    text_cover_width = px_x(938) - text_cover_x
+    details_top = px_y_from_top(1172)
+    details_bottom = px_y_from_top(1312)
+    pdf.setFillColor(colors.white)
+    pdf.rect(text_cover_x - 6, details_bottom, text_cover_width + 8, details_top - details_bottom, stroke=0, fill=1)
+    text_rows = [
+        (1188, name or email, "Helvetica-Bold", 14.0, colors.HexColor("#10213D")),
+        (1238, email, "Helvetica", 11.5, colors.HexColor("#475569")),
+        (
+            1288,
+            f"Gültig bis: {expires_at.astimezone(EUROPE_BERLIN).strftime('%d.%m.%Y, %H:%M') if expires_at else 'offen'}",
+            "Helvetica",
+            11.5,
+            colors.HexColor("#475569"),
+        ),
+    ]
+    for row_y, value, font_name, max_size, color in text_rows:
+        baseline_y = px_y_from_top(row_y) + 8
+        font_size = fit_font_size(value, font_name, max_size, text_cover_width - 2)
+        pdf.setFillColor(color)
+        pdf.setFont(font_name, font_size)
+        pdf.drawString(text_cover_x, baseline_y, value)
+
+
 REVIEW_APP_EMAIL = os.environ.get("REVIEW_APP_EMAIL", "testUser@spd.de").strip()
 REVIEW_APP_PASSWORD = os.environ.get("REVIEW_APP_PASSWORD", "Test123!123").strip()
 REVIEW_APP_USER_ID = "11111111-1111-4111-8111-111111111111"
@@ -2068,6 +2216,12 @@ def ensure_onboarding_tables():
                 """
                 CREATE INDEX IF NOT EXISTS idx_activation_invitations_user_id
                 ON activation_invitations(user_id)
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE activation_invitations
+                ADD COLUMN IF NOT EXISTS activation_code TEXT
                 """
             )
             cur.execute(
@@ -2331,6 +2485,68 @@ def _parse_bundestag_conferences() -> list[dict]:
         )
 
     return sessions
+
+
+def _parse_bundestag_session_calendar_weeks() -> list[dict]:
+    index_html = _bundestag_fetch_xml(BUNDESTAG_SESSION_CALENDAR_URL)
+    year_pages: list[tuple[int, str]] = []
+    seen_urls: set[str] = set()
+
+    for match in re.finditer(
+        r'(/parlament/plenum/sitzungskalender/bt(20\d{2})-\d+)',
+        index_html,
+        re.IGNORECASE,
+    ):
+        relative_url = match.group(1)
+        year = int(match.group(2))
+        absolute_url = f"https://www.bundestag.de{relative_url}"
+        if absolute_url in seen_urls:
+            continue
+        seen_urls.add(absolute_url)
+        year_pages.append((year, absolute_url))
+
+    if not year_pages:
+        raise HTTPException(
+            status_code=502,
+            detail="Bundestag-Sitzungskalender konnte nicht gelesen werden.",
+        )
+
+    weeks_by_range: dict[tuple[date, date], dict] = {}
+    for year, page_url in sorted(year_pages):
+        page_html = _bundestag_fetch_xml(page_url)
+        for match in re.finditer(
+            r'(\d{2})\.(\d{2})\.\s*-\s*(\d{2})\.(\d{2})\.(\d{4})',
+            page_html,
+        ):
+            start_day = int(match.group(1))
+            start_month = int(match.group(2))
+            end_day = int(match.group(3))
+            end_month = int(match.group(4))
+            end_year = int(match.group(5))
+            start_year = end_year if start_month <= end_month else end_year - 1
+
+            try:
+                week_start = date(start_year, start_month, start_day)
+                week_end = date(end_year, end_month, end_day)
+            except ValueError:
+                continue
+
+            if week_end < week_start:
+                continue
+
+            key = (week_start, week_end)
+            weeks_by_range[key] = {
+                "week_start": week_start,
+                "week_end": week_end,
+                "calendar_year": year,
+                "calendar_url": page_url,
+                "source": "bundestag_session_calendar",
+            }
+
+    return sorted(
+        weeks_by_range.values(),
+        key=lambda item: (item["week_start"], item["week_end"]),
+    )
 
 
 def _parse_bundestag_speaker() -> dict:
@@ -2748,6 +2964,191 @@ def _lookup_next_assigned_slot_for_user(
     }
 
 
+def _parliament_cache_key(at: datetime | None) -> str:
+    if at is None:
+        return "live"
+    return at.isoformat()
+
+
+def _build_cached_parliament_live_payload(at: datetime | None = None) -> dict:
+    key = _parliament_cache_key(at)
+    now = datetime.now(timezone.utc)
+    with _bundestag_live_cache_lock:
+        cached = _parliament_payload_cache.get(key)
+        if cached and (now - cached[0]).total_seconds() < BUNDESTAG_LIVE_CACHE_SECONDS:
+            return copy.deepcopy(cached[1])
+
+    payload = _build_parliament_live_payload(at=at)
+    with _bundestag_live_cache_lock:
+        _parliament_payload_cache[key] = (now, payload)
+    return copy.deepcopy(payload)
+
+
+def _build_cached_faction_speech_entries(*, parliament_payload: dict, at: datetime | None = None) -> list[dict]:
+    key = _parliament_cache_key(at)
+    now = datetime.now(timezone.utc)
+    with _bundestag_live_cache_lock:
+        cached = _faction_speeches_cache.get(key)
+        if cached and (now - cached[0]).total_seconds() < BUNDESTAG_LIVE_CACHE_SECONDS:
+            return copy.deepcopy(cached[1])
+
+    speeches = _build_faction_speech_entries(parliament_payload=parliament_payload)
+    with _bundestag_live_cache_lock:
+        _faction_speeches_cache[key] = (now, speeches)
+    return copy.deepcopy(speeches)
+
+
+def _get_upcoming_slots_for_user(user_id: UUID | str, *, limit: int = 20) -> list[dict]:
+    ensure_direct_slot_assignment_schema()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    s.id,
+                    s.slot_date,
+                    s.start_time,
+                    s.end_time,
+                    s.slot_code,
+                    s.weekday,
+                    sa.assignment_type
+                FROM slot_assignments sa
+                JOIN duty_slots s ON s.id = sa.slot_id
+                WHERE sa.user_id = %s
+                  AND (
+                    (s.slot_date::timestamp + s.start_time)
+                    >= (now() AT TIME ZONE 'Europe/Berlin')
+                  )
+                ORDER BY s.slot_date, s.start_time
+                LIMIT %s
+                """,
+                (str(user_id), limit),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "slot_id": str(r[0]),
+            "date": str(r[1]),
+            "start_time": str(r[2]),
+            "end_time": str(r[3]) if r[3] else None,
+            "slot_code": r[4],
+            "weekday": r[5],
+            "assignment_type": _normalise_assignment_type(r[6]),
+        }
+        for r in rows
+    ]
+
+
+def _get_pending_exchange_count_for_user(user_id: UUID | str) -> int:
+    ensure_direct_slot_assignment_schema()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*)
+                FROM exchanges e
+                WHERE e.status IN ('OPEN'::exchange_status,'PENDING_CONFIRMATION'::exchange_status)
+                  AND (
+                    (e.from_user_id = %s AND e.from_confirmed_at IS NULL)
+                    OR
+                    (e.to_user_id = %s AND e.to_confirmed_at IS NULL)
+                  )
+                """,
+                (user_id, user_id),
+            )
+            row = cur.fetchone()
+
+    return int((row[0] if row else 0) or 0)
+
+
+def _get_latest_documents_for_user(user_id: UUID | str) -> tuple[dict | None, dict | None]:
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    latest.id,
+                    latest.title,
+                    latest.filename_original,
+                    latest.mime_type,
+                    latest.category,
+                    latest.created_at,
+                    summary.id,
+                    summary.title,
+                    summary.filename_original,
+                    summary.mime_type,
+                    summary.category,
+                    summary.created_at
+                FROM
+                    (
+                        SELECT
+                            d.id,
+                            d.title,
+                            d.filename_original,
+                            d.mime_type,
+                            d.category,
+                            d.created_at
+                        FROM documents d
+                        JOIN document_recipients r
+                          ON r.document_id = d.id
+                        WHERE r.user_id = %s
+                        ORDER BY d.created_at DESC
+                        LIMIT 1
+                    ) latest
+                FULL OUTER JOIN
+                    (
+                        SELECT
+                            d.id,
+                            d.title,
+                            d.filename_original,
+                            d.mime_type,
+                            d.category,
+                            d.created_at
+                        FROM documents d
+                        JOIN document_recipients r
+                          ON r.document_id = d.id
+                        WHERE r.user_id = %s
+                          AND d.category = 'kurzuebersicht'
+                        ORDER BY d.created_at DESC
+                        LIMIT 1
+                    ) summary
+                ON true
+                """,
+                (user_id, user_id),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None, None
+
+    latest_document = None
+    if row[0]:
+        latest_document = {
+            "id": str(row[0]),
+            "title": row[1],
+            "filename": row[2],
+            "mime_type": row[3],
+            "category": row[4],
+            "created_at": row[5].isoformat() if row[5] else None,
+        }
+
+    latest_summary_document = None
+    if row[6]:
+        latest_summary_document = {
+            "id": str(row[6]),
+            "title": row[7],
+            "filename": row[8],
+            "mime_type": row[9],
+            "category": row[10],
+            "created_at": row[11].isoformat() if row[11] else None,
+        }
+
+    return latest_document, latest_summary_document
+
+
 def _build_parliament_live_payload(at: datetime | None = None) -> dict:
     speaker = _parse_bundestag_speaker()
     sessions = _parse_bundestag_conferences()
@@ -2874,6 +3275,88 @@ def _user_can_manage_slot_attendance(
     return cur.fetchone() is not None
 
 
+def _find_manageable_current_or_next_slot(
+    cur,
+    *,
+    user_id: UUID | str,
+    role: str | None,
+):
+    if role in ("admin", "pgf"):
+        cur.execute(
+            """
+            SELECT id, slot_date, start_time, end_time, slot_code
+            FROM duty_slots
+            WHERE
+              (
+                (slot_date::timestamp + start_time)
+                  <= (now() AT TIME ZONE 'Europe/Berlin')
+                AND (
+                  open_end = true OR
+                  (slot_date::timestamp + end_time)
+                    >= (now() AT TIME ZONE 'Europe/Berlin')
+                )
+              )
+              OR (
+                slot_date = (now() AT TIME ZONE 'Europe/Berlin')::date
+                AND (slot_date::timestamp + start_time)
+                  >= (now() AT TIME ZONE 'Europe/Berlin')
+              )
+            ORDER BY
+              CASE
+                WHEN (slot_date::timestamp + start_time)
+                  <= (now() AT TIME ZONE 'Europe/Berlin')
+                THEN 0
+                ELSE 1
+              END,
+              slot_date,
+              start_time
+            LIMIT 1
+            """
+        )
+        return cur.fetchone()
+
+    cur.execute(
+        """
+        SELECT id, slot_date, start_time, end_time, slot_code
+        FROM duty_slots
+        WHERE
+          (
+            (slot_date::timestamp + start_time)
+              <= (now() AT TIME ZONE 'Europe/Berlin')
+            AND (
+              open_end = true OR
+              (slot_date::timestamp + end_time)
+                >= (now() AT TIME ZONE 'Europe/Berlin')
+            )
+          )
+          OR (
+            slot_date = (now() AT TIME ZONE 'Europe/Berlin')::date
+            AND (slot_date::timestamp + start_time)
+              >= (now() AT TIME ZONE 'Europe/Berlin')
+          )
+        ORDER BY
+          CASE
+            WHEN (slot_date::timestamp + start_time)
+              <= (now() AT TIME ZONE 'Europe/Berlin')
+            THEN 0
+            ELSE 1
+          END,
+          slot_date,
+          start_time
+        """
+    )
+    slots = cur.fetchall()
+    for slot in slots:
+        if _user_can_manage_slot_attendance(
+            cur,
+            slot_id=slot[0],
+            user_id=user_id,
+            role=role,
+        ):
+            return slot
+    return None
+
+
 def require_self_or_admin(target_user_id: UUID | str, authorization: str | None):
     actor = get_current_user_from_firebase(authorization)
     if actor["role"] in ("admin", "pgf") or actor["id"] == str(target_user_id):
@@ -2998,9 +3481,23 @@ def _normalize_email(value: str) -> str:
     return value.strip().lower()
 
 
+def _format_person_name(first_name: str | None, last_name: str | None) -> str | None:
+    first = (first_name or "").strip()
+    last = (last_name or "").strip()
+    if not first and not last:
+        return None
+
+    title_match = re.match(r"^((?:(?:Prof\.|Dr\.|jur\.|\(med\))\s*)+)(.+)$", last, flags=re.IGNORECASE)
+    if title_match:
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip()
+        surname = title_match.group(2).strip()
+        return " ".join(part for part in [title, first, surname] if part) or None
+
+    return " ".join(part for part in [first, last] if part) or None
+
+
 def _display_name(first_name: str | None, last_name: str | None) -> str | None:
-    name = f"{(first_name or '').strip()} {(last_name or '').strip()}".strip()
-    return name or None
+    return _format_person_name(first_name, last_name)
 
 
 def _resolve_or_create_firebase_user(
@@ -3353,7 +3850,7 @@ def get_my_live_info(
         return _review_live_info_payload(actor)
 
     effective_at = _parse_iso_datetime(at) if at else None
-    payload = _build_parliament_live_payload(at=effective_at)
+    payload = _build_cached_parliament_live_payload(at=effective_at)
     comparison_at = effective_at or datetime.now(EUROPE_BERLIN)
 
     next_pgf_duty = None
@@ -3386,6 +3883,121 @@ def get_my_live_info(
     return payload
 
 
+def _build_home_payload(
+    *,
+    actor: dict,
+    principal: dict,
+    effective_at: datetime | None = None,
+) -> dict:
+    if _is_review_user(actor):
+        review_payload = _review_live_info_payload(actor)
+        return {
+            "next_slot": None,
+            "pending_count": 0,
+            "unread_count": 0,
+            "latest_document": None,
+            "latest_summary_document": None,
+            "live_info": review_payload,
+            "faction_speeches": _review_faction_speeches_payload().get("speeches", []),
+        }
+
+    comparison_at = effective_at or datetime.now(EUROPE_BERLIN)
+    parliament_payload = _build_cached_parliament_live_payload(at=effective_at)
+
+    next_pgf_duty = None
+    if actor["role"] == "pgf":
+        next_pgf_duty = _serialize_service_slot(
+            _lookup_next_assigned_slot_for_user(
+                actor["id"],
+                effective_at=comparison_at,
+            )
+        )
+
+    parliament_payload["viewer"] = {
+        "user_id": actor["id"],
+        "role": actor["role"],
+        "principal_user_id": principal["id"],
+        "principal_name": " ".join(
+            [part for part in [principal.get("first_name"), principal.get("last_name")] if part]
+        ).strip()
+        or principal.get("email")
+        or principal["id"],
+    }
+    parliament_payload["next_pgf_duty"] = next_pgf_duty
+    next_speech, next_speech_source = _build_next_speech_for_user(
+        principal["id"],
+        effective_at=comparison_at,
+        parliament_payload=parliament_payload,
+    )
+    parliament_payload["next_speech"] = next_speech
+    parliament_payload["next_speech_source"] = next_speech_source
+
+    upcoming_slots = _get_upcoming_slots_for_user(actor["id"])
+    active_slots = [
+        slot
+        for slot in upcoming_slots
+        if (slot.get("assignment_type") or "active") != "ruf"
+    ]
+    next_slot = active_slots[0] if active_slots else None
+    pending_count = _get_pending_exchange_count_for_user(actor["id"])
+    unread_count = get_unread_message_count(actor["id"])
+    latest_document, latest_summary_document = _get_latest_documents_for_user(actor["id"])
+    faction_speeches = _build_cached_faction_speech_entries(
+        parliament_payload=parliament_payload,
+        at=effective_at,
+    )
+
+    return {
+        "next_slot": next_slot,
+        "pending_count": pending_count,
+        "unread_count": unread_count,
+        "latest_document": latest_document,
+        "latest_summary_document": latest_summary_document,
+        "live_info": parliament_payload,
+        "faction_speeches": faction_speeches,
+    }
+
+
+@app.get("/me/home")
+def get_my_home(
+    at: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    scope = _resolve_actor_scope(authorization)
+    effective_at = _parse_iso_datetime(at) if at else None
+    return _build_home_payload(
+        actor=scope["actor"],
+        principal=scope["principal"],
+        effective_at=effective_at,
+    )
+
+
+@app.get("/me/agenda")
+def get_my_agenda(
+    at: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+):
+    scope = _resolve_actor_scope(authorization)
+    actor = scope["actor"]
+    if _is_review_user(actor):
+        review_live = _review_live_info_payload(actor)
+        return {
+            "agenda_info": review_live,
+            "faction_speeches": _review_faction_speeches_payload().get("speeches", []),
+        }
+
+    effective_at = _parse_iso_datetime(at) if at else None
+    agenda_info = _build_cached_parliament_live_payload(at=effective_at)
+    faction_speeches = _build_cached_faction_speech_entries(
+        parliament_payload=agenda_info,
+        at=effective_at,
+    )
+    return {
+        "agenda_info": agenda_info,
+        "faction_speeches": faction_speeches,
+    }
+
+
 @app.get("/me/faction-speakers")
 def get_my_faction_speakers(
     at: str | None = Query(default=None),
@@ -3396,11 +4008,14 @@ def get_my_faction_speakers(
         return _review_faction_speeches_payload()
 
     effective_at = _parse_iso_datetime(at) if at else None
-    parliament_payload = _build_parliament_live_payload(at=effective_at)
+    parliament_payload = _build_cached_parliament_live_payload(at=effective_at)
     return {
         "generated_at": datetime.now(EUROPE_BERLIN).isoformat(),
         "effective_at": (effective_at or datetime.now(EUROPE_BERLIN)).isoformat(),
-        "speeches": _build_faction_speech_entries(parliament_payload=parliament_payload),
+        "speeches": _build_cached_faction_speech_entries(
+            parliament_payload=parliament_payload,
+            at=effective_at,
+        ),
     }
 
 
@@ -5945,7 +6560,7 @@ def onboarding_verify(payload: OnboardingActivationVerify):
     return {
         "ok": True,
         "email_hint": row[3],
-        "name": f"{row[4] or ''} {row[5] or ''}".strip() or None,
+        "name": _format_person_name(row[4], row[5]),
     }
 
 
@@ -6064,7 +6679,7 @@ def onboarding_review_access(payload: ReviewAccessActivate):
         "ok": True,
         "email": REVIEW_APP_EMAIL,
         "password": REVIEW_APP_PASSWORD,
-        "name": f"{user_row[2] or ''} {user_row[3] or ''}".strip(),
+        "name": _format_person_name(user_row[2], user_row[3]) or "",
     }
 
 
@@ -6086,6 +6701,7 @@ def admin_list_onboarding_invitations(authorization: str | None = Header(default
                     i.expires_at,
                     i.activated_at,
                     i.created_at,
+                    i.activation_code,
                     COUNT(td.id) FILTER (WHERE td.revoked_at IS NULL) AS active_devices
                 FROM activation_invitations i
                 JOIN users u ON u.id = i.user_id
@@ -6102,15 +6718,68 @@ def admin_list_onboarding_invitations(authorization: str | None = Header(default
                 "id": str(r[0]),
                 "user_id": str(r[1]),
                 "email": r[2],
-                "name": f"{r[3] or ''} {r[4] or ''}".strip(),
+                "name": _format_person_name(r[3], r[4]) or "",
                 "status": r[5],
                 "expires_at": r[6].isoformat() if r[6] else None,
                 "activated_at": r[7].isoformat() if r[7] else None,
                 "created_at": r[8].isoformat() if r[8] else None,
-                "active_devices": int(r[9] or 0),
+                "has_code": bool(r[9]),
+                "active_devices": int(r[10] or 0),
             }
             for r in rows
         ]
+    }
+
+
+@app.get("/admin/onboarding/invitations/{invitation_id}")
+def admin_get_onboarding_invitation(
+    invitation_id: UUID,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_onboarding_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    i.id,
+                    i.user_id,
+                    u.email,
+                    u.first_name,
+                    u.last_name,
+                    i.status,
+                    i.expires_at,
+                    i.activated_at,
+                    i.created_at,
+                    i.activation_code,
+                    COUNT(td.id) FILTER (WHERE td.revoked_at IS NULL) AS active_devices
+                FROM activation_invitations i
+                JOIN users u ON u.id = i.user_id
+                LEFT JOIN trusted_devices td ON td.user_id = u.id
+                WHERE i.id = %s
+                GROUP BY i.id, u.email, u.first_name, u.last_name
+                """,
+                (invitation_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+
+    return {
+        "id": str(row[0]),
+        "user_id": str(row[1]),
+        "email": row[2],
+        "name": _format_person_name(row[3], row[4]) or "",
+        "status": row[5],
+        "expires_at": row[6].isoformat() if row[6] else None,
+        "activated_at": row[7].isoformat() if row[7] else None,
+        "created_at": row[8].isoformat() if row[8] else None,
+        "code": row[9],
+        "qr_payload": f"spdfraktion://activate?code={row[9]}" if row[9] else None,
+        "has_code": bool(row[9]),
+        "active_devices": int(row[10] or 0),
     }
 
 
@@ -6153,45 +6822,115 @@ def admin_create_onboarding_invitations(
 
             invitations = []
             for user_row in users:
-                code = _new_activation_code()
-                token_hash = _hash_activation_code(code)
-                if payload.replace_open:
-                    cur.execute(
-                        """
-                        UPDATE activation_invitations
-                        SET status = 'revoked'
-                        WHERE user_id = %s
-                          AND status = 'open'
-                        """,
-                        (user_row[0],),
-                    )
-                cur.execute(
-                    """
-                    INSERT INTO activation_invitations (
-                        user_id, token_hash, expires_at, created_by_user_id
-                    )
-                    VALUES (%s, %s, %s, %s)
-                    RETURNING id, created_at
-                    """,
-                    (user_row[0], token_hash, expires_at, actor["id"]),
-                )
-                invitation_row = cur.fetchone()
-                qr_payload = f"spdfraktion://activate?code={code}"
                 invitations.append(
-                    {
-                        "id": str(invitation_row[0]),
-                        "user_id": str(user_row[0]),
-                        "email": user_row[1],
-                        "name": f"{user_row[2] or ''} {user_row[3] or ''}".strip(),
-                        "code": code,
-                        "qr_payload": qr_payload,
-                        "expires_at": expires_at.isoformat(),
-                        "created_at": invitation_row[1].isoformat() if invitation_row[1] else None,
-                    }
+                    _create_onboarding_invitation(
+                        cur,
+                        user_row=user_row,
+                        actor_user_id=actor["id"],
+                        expires_at=expires_at,
+                        replace_open=payload.replace_open,
+                    )
                 )
         conn.commit()
 
     return {"items": invitations}
+
+
+@app.post("/admin/onboarding/users/{user_id}/invitation")
+def admin_regenerate_onboarding_invitation(
+    user_id: UUID,
+    payload: OnboardingInvitationCreate,
+    authorization: str | None = Header(default=None),
+):
+    actor = require_admin(authorization)
+    ensure_onboarding_tables()
+    ensure_user_mdb_schema()
+    expires_days = max(1, min(int(payload.expires_days or 60), 365))
+    expires_at = datetime.now(timezone.utc) + timedelta(days=expires_days)
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, email, first_name, last_name
+                FROM users
+                WHERE id = %s
+                  AND {ACTIVE_REAL_USER_SQL}
+                """,
+                (user_id,),
+            )
+            user_row = cur.fetchone()
+            if not user_row:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            invitation = _create_onboarding_invitation(
+                cur,
+                user_row=user_row,
+                actor_user_id=actor["id"],
+                expires_at=expires_at,
+                replace_open=True,
+            )
+        conn.commit()
+
+    return invitation
+
+
+@app.get("/admin/onboarding/invitations/{invitation_id}/pdf")
+def admin_download_onboarding_invitation_pdf(
+    invitation_id: UUID,
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_onboarding_tables()
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    i.id,
+                    i.activation_code,
+                    i.expires_at,
+                    u.email,
+                    u.first_name,
+                    u.last_name
+                FROM activation_invitations i
+                JOIN users u ON u.id = i.user_id
+                WHERE i.id = %s
+                """,
+                (invitation_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    if not row[1]:
+        raise HTTPException(
+            status_code=409,
+            detail="Code dieser Einladung kann nicht erneut angezeigt werden. Bitte neuen Code erzeugen.",
+        )
+
+    buffer = BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    _draw_onboarding_handout(
+        pdf,
+        name=_format_person_name(row[4], row[5]) or row[3],
+        email=row[3],
+        code=row[1],
+        expires_at=row[2],
+    )
+    pdf.showPage()
+    pdf.save()
+    buffer.seek(0)
+
+    safe_name = re.sub(r"[^a-z0-9]+", "-", (f"{row[4] or ''}-{row[5] or ''}" or row[3]).strip().lower()).strip("-")
+    if not safe_name:
+        safe_name = "onboarding"
+    filename = f"onboarding-{safe_name}.pdf"
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/admin/users/{user_id}/trusted-devices")
@@ -7485,49 +8224,21 @@ def get_current_session(authorization: str | None = Header(default=None)):
 
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
-            # 1. laufenden Slot finden
-            cur.execute(
-                """
-                SELECT id, slot_date, start_time, end_time, slot_code
-                FROM duty_slots
-                WHERE
-                  (slot_date::timestamp + start_time)
-                    <= (now() AT TIME ZONE 'Europe/Berlin')
-                  AND (
-                    open_end = true OR
-                    (slot_date::timestamp + end_time)
-                      >= (now() AT TIME ZONE 'Europe/Berlin')
-                  )
-                ORDER BY slot_date, start_time
-                LIMIT 1
-                """
+            cur.execute("SELECT role FROM users WHERE id = %s", (actor["id"],))
+            actor_row = cur.fetchone()
+            if not actor_row:
+                raise HTTPException(status_code=403, detail="User not found")
+
+            slot = _find_manageable_current_or_next_slot(
+                cur,
+                user_id=actor["id"],
+                role=actor_row[0],
             )
-
-            slot = cur.fetchone()
-
-            # 2. fallback: nächster Slot heute
-            if not slot:
-                cur.execute(
-                    """
-                    SELECT id, slot_date, start_time, end_time, slot_code
-                    FROM duty_slots
-                    WHERE slot_date = (now() AT TIME ZONE 'Europe/Berlin')::date
-                      AND (slot_date::timestamp + start_time)
-                        >= (now() AT TIME ZONE 'Europe/Berlin')
-                    ORDER BY start_time
-                    LIMIT 1
-                    """
-                )
-                slot = cur.fetchone()
 
             if not slot:
                 return {"slot": None, "participants": []}
 
             slot_id = slot[0]
-            cur.execute("SELECT role FROM users WHERE id = %s", (actor["id"],))
-            actor_row = cur.fetchone()
-            if not actor_row:
-                raise HTTPException(status_code=403, detail="User not found")
             if not _user_can_manage_slot_attendance(
                 cur,
                 slot_id=slot_id,
@@ -7579,6 +8290,38 @@ def get_current_session(authorization: str | None = Header(default=None)):
             }
             for p in participants
         ],
+    }
+
+
+@app.get("/pgf/access")
+def get_pgf_access(authorization: str | None = Header(default=None)):
+    actor = get_current_user_from_firebase(authorization)
+    ensure_direct_slot_assignment_schema()
+    ensure_temporary_pgf_grants_table()
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT role FROM users WHERE id = %s", (actor["id"],))
+            actor_row = cur.fetchone()
+            if not actor_row:
+                raise HTTPException(status_code=403, detail="User not found")
+
+            role = (actor_row[0] or "").strip().lower()
+            if role == "pgf":
+                return {
+                    "can_access_pgf_area": True,
+                    "access_type": "pgf",
+                }
+            slot_row = _find_manageable_current_or_next_slot(
+                cur,
+                user_id=actor["id"],
+                role=role,
+            )
+            has_temporary_access = slot_row is not None
+
+    return {
+        "can_access_pgf_area": has_temporary_access,
+        "access_type": "temporary" if has_temporary_access else "none",
     }
 
 
@@ -7685,8 +8428,11 @@ def admin_create_temporary_pgf_grant_for_slot(
             user_row = cur.fetchone()
             if not user_row:
                 raise HTTPException(status_code=404, detail="User not found")
-            if user_row[0] != "mdb":
-                raise HTTPException(status_code=400, detail="Nur MDBs können temporäre PGF-Rechte erhalten")
+            if user_row[0] not in ("mdb", "pgf"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Nur MdBs und PGFs können temporäre PGF-Rechte erhalten",
+                )
             if not bool(user_row[1]):
                 raise HTTPException(status_code=400, detail="Nutzer ist inaktiv")
             if payload.valid_until <= payload.valid_from:
@@ -9084,7 +9830,7 @@ def admin_get_user(user_id: UUID, authorization: str | None = Header(default=Non
     with psycopg.connect(DB_URL) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     u.id,
                     u.email,
@@ -9669,7 +10415,7 @@ def admin_list_staff(
                 scoped_faction_only = False
 
             cur.execute(
-                """
+                f"""
                 SELECT
                     u.id,
                     u.email,
@@ -11350,7 +12096,8 @@ def admin_list_slots(
                         s.end_time,
                         COALESCE(s.open_end, false) AS open_end,
                         COALESCE(sa.active_count, 0) AS active_count,
-                        COALESCE(sa.ruf_count, 0) AS ruf_count
+                        COALESCE(sa.ruf_count, 0) AS ruf_count,
+                        pgf.pgf_duty
                     FROM duty_slots s
                     LEFT JOIN LATERAL (
                         SELECT
@@ -11359,6 +12106,31 @@ def admin_list_slots(
                         FROM slot_assignments
                         WHERE slot_id = s.id
                     ) sa ON true
+                    LEFT JOIN LATERAL (
+                        SELECT string_agg(names.name, ', ' ORDER BY names.name) AS pgf_duty
+                        FROM (
+                            SELECT DISTINCT trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) AS name
+                            FROM slot_assignments sa_pgf
+                            JOIN users u ON u.id = sa_pgf.user_id
+                            WHERE sa_pgf.slot_id = s.id
+                              AND u.role = 'pgf'
+                              AND trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> ''
+                            UNION
+                            SELECT DISTINCT trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) AS name
+                            FROM temporary_pgf_grants g
+                            JOIN users u ON u.id = g.user_id
+                            WHERE g.valid_from < (
+                                    (
+                                        s.slot_date::timestamp
+                                        + COALESCE(s.end_time, s.start_time + interval '12 hour')
+                                    ) AT TIME ZONE 'Europe/Berlin'
+                                )
+                              AND g.valid_until > (
+                                    (s.slot_date::timestamp + s.start_time) AT TIME ZONE 'Europe/Berlin'
+                                )
+                              AND trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> ''
+                        ) names
+                    ) pgf ON true
                     WHERE (%s::date IS NULL OR s.slot_date >= %s::date)
                       AND (%s::date IS NULL OR s.slot_date <= %s::date)
                       AND (
@@ -11385,7 +12157,8 @@ def admin_list_slots(
                         s.end_time,
                         COALESCE(s.open_end, false) AS open_end,
                         COALESCE(sa.active_count, 0) AS active_count,
-                        COALESCE(sa.ruf_count, 0) AS ruf_count
+                        COALESCE(sa.ruf_count, 0) AS ruf_count,
+                        pgf.pgf_duty
                     FROM duty_slots s
                     LEFT JOIN LATERAL (
                         SELECT
@@ -11394,6 +12167,31 @@ def admin_list_slots(
                         FROM slot_assignments
                         WHERE slot_id = s.id
                     ) sa ON true
+                    LEFT JOIN LATERAL (
+                        SELECT string_agg(names.name, ', ' ORDER BY names.name) AS pgf_duty
+                        FROM (
+                            SELECT DISTINCT trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) AS name
+                            FROM slot_assignments sa_pgf
+                            JOIN users u ON u.id = sa_pgf.user_id
+                            WHERE sa_pgf.slot_id = s.id
+                              AND u.role = 'pgf'
+                              AND trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> ''
+                            UNION
+                            SELECT DISTINCT trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) AS name
+                            FROM temporary_pgf_grants g
+                            JOIN users u ON u.id = g.user_id
+                            WHERE g.valid_from < (
+                                    (
+                                        s.slot_date::timestamp
+                                        + COALESCE(s.end_time, s.start_time + interval '12 hour')
+                                    ) AT TIME ZONE 'Europe/Berlin'
+                                )
+                              AND g.valid_until > (
+                                    (s.slot_date::timestamp + s.start_time) AT TIME ZONE 'Europe/Berlin'
+                                )
+                              AND trim(concat(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) <> ''
+                        ) names
+                    ) pgf ON true
                     WHERE (%s::date IS NULL OR s.slot_date >= %s::date)
                       AND (%s::date IS NULL OR s.slot_date <= %s::date)
                       AND EXISTS (
@@ -11496,6 +12294,61 @@ def admin_list_slot_weeks(
             rows = cur.fetchall()
 
     return [_slot_week_row_to_dict(r) for r in rows]
+
+
+@app.get("/admin/slot-weeks/suggestion")
+def admin_get_slot_week_suggestion(
+    authorization: str | None = Header(default=None),
+):
+    require_admin(authorization)
+    ensure_direct_slot_assignment_schema()
+
+    calendar_weeks = _parse_bundestag_session_calendar_weeks()
+    if not calendar_weeks:
+        raise HTTPException(
+            status_code=404,
+            detail="Im offiziellen Bundestag-Sitzungskalender wurden keine Sitzungswochen gefunden.",
+        )
+
+    with psycopg.connect(DB_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT MAX(date_trunc('week', slot_date)::date)
+                FROM duty_slots
+                """
+            )
+            latest_existing_week_start = cur.fetchone()[0]
+
+    today = date.today()
+    if latest_existing_week_start is not None:
+        suggested_week = next(
+            (week for week in calendar_weeks if week["week_start"] > latest_existing_week_start),
+            None,
+        )
+    else:
+        suggested_week = next(
+            (week for week in calendar_weeks if week["week_end"] >= today),
+            None,
+        )
+
+    if suggested_week is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Im offiziellen Bundestag-Sitzungskalender wurde keine naechste Sitzungswoche gefunden.",
+        )
+
+    return {
+        "week_start": suggested_week["week_start"].isoformat(),
+        "week_end": suggested_week["week_end"].isoformat(),
+        "source": suggested_week["source"],
+        "calendar_year": suggested_week["calendar_year"],
+        "calendar_url": suggested_week["calendar_url"],
+        "calendar_index_url": BUNDESTAG_SESSION_CALENDAR_URL,
+        "last_existing_week_start": latest_existing_week_start.isoformat()
+        if latest_existing_week_start
+        else None,
+    }
 
 
 @app.post("/admin/slots")
@@ -11958,7 +12811,7 @@ def admin_slot_participants(
                 raise HTTPException(status_code=404, detail="Slot not found")
 
             cur.execute(
-                """
+                f"""
                 SELECT
                     u.id,
                     u.email,

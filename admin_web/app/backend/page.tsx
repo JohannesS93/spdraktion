@@ -20,6 +20,7 @@ import {
 import { clearSession, getSession, type SessionUser } from "@/lib/auth";
 import { auth } from "@/lib/firebase";
 import { AdminShell } from "@/components/admin-shell";
+import { getPostLoginRoute } from "@/lib/navigation";
 
 type NavItem = {
   href: string;
@@ -161,6 +162,12 @@ export default function BackendHomePage() {
     return unsubscribe;
   }, [router]);
 
+  useEffect(() => {
+    if (!session) return;
+    if (session.role === "admin") return;
+    router.replace(getPostLoginRoute(session.role));
+  }, [router, session]);
+
   const navItems = useMemo(() => {
     if (!session) return [];
     if (session.role === "admin") return [...SHARED_ITEMS, ...ADMIN_ONLY_ITEMS];
@@ -172,7 +179,7 @@ export default function BackendHomePage() {
     return <div className="min-h-screen bg-[#f7f7f8]" />;
   }
 
-  if (!session) return null;
+  if (!session || session.role !== "admin") return null;
 
   return (
     <AdminShell
